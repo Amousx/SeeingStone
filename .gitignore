@@ -6,6 +6,10 @@
 *.dylib
 arbitrage-monitor
 arbitrage-monitor.exe
+seeing-stone
+seeing-stone.exe
+crypto-arbitrage-monitor
+crypto-arbitrage-monitor.exe
 
 # Test binary
 *.test

@@ -4,7 +4,6 @@ import (
 	"crypto-arbitrage-monitor/internal/arbitrage"
 	"crypto-arbitrage-monitor/pkg/common"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
@@ -145,7 +144,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// 从calculator获取最新的套利机会
 		if m.calculator != nil {
 			m.opportunities = m.calculator.GetOpportunities()
-			log.Printf("[UI] Fetched %d opportunities from calculator", len(m.opportunities))
 			m.updateTable()
 		}
 		return m, tickCmd()
@@ -153,8 +151,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case UpdateOpportunitiesMsg:
 		m.opportunities = msg
 		m.lastUpdate = time.Now()
-		// Debug log
-		log.Printf("[UI] Received %d opportunities", len(msg))
 		m.updateTable()
 		return m, nil
 	}
@@ -209,11 +205,9 @@ func (m Model) View() string {
 func (m *Model) updateTable() {
 	// 过滤
 	filtered := arbitrage.FilterOpportunities(m.opportunities, m.filterType)
-	log.Printf("[UI] After filter (%s): %d opportunities", m.filterType, len(filtered))
 
 	// 排序
 	sorted := arbitrage.SortOpportunities(filtered, m.sortBy, m.sortDesc)
-	log.Printf("[UI] After sort (%s %v): %d opportunities", m.sortBy, m.sortDesc, len(sorted))
 
 	// 转换为表格行
 	rows := make([]table.Row, 0, len(sorted))
@@ -235,7 +229,6 @@ func (m *Model) updateTable() {
 	}
 
 	m.table.SetRows(rows)
-	log.Printf("[UI] Set %d rows to table", len(rows))
 }
 
 // getSortDirectionSymbol 获取排序方向符号
