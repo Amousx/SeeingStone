@@ -86,6 +86,21 @@ func (c *Calculator) GetPriceCount() int {
 	return len(c.prices)
 }
 
+// GetAllPrices 获取所有价格数据
+func (c *Calculator) GetAllPrices() []*common.Price {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	prices := make([]*common.Price, 0, len(c.prices))
+	for _, price := range c.prices {
+		// 只返回未过期的价格（60秒内）
+		if time.Since(price.LastUpdated) <= 60*time.Second {
+			prices = append(prices, price)
+		}
+	}
+	return prices
+}
+
 // makePriceKey 生成价格键
 func (c *Calculator) makePriceKey(exchange common.Exchange, marketType common.MarketType, symbol string) string {
 	return fmt.Sprintf("%s_%s_%s", exchange, marketType, symbol)
@@ -131,12 +146,22 @@ func (c *Calculator) calculateSymbolArbitrage(symbol string, prices []*common.Pr
 			// 买入price2（ask），卖出price1（bid）
 			spread2 := c.calculateSpread(price2.AskPrice, price1.BidPrice)
 
-			// 选择价差绝对值较大的一个
+			// 优先选择正价差（套利机会），如果都是负数选择损失小的
 			var opp *common.ArbitrageOpportunity
-			if math.Abs(spread1) > math.Abs(spread2) {
-				opp = c.createOpportunity(symbol, price1, price2, spread1)
+			if spread1 > 0 || spread2 > 0 {
+				// 至少有一个正价差，选择更大的
+				if spread1 > spread2 {
+					opp = c.createOpportunity(symbol, price1, price2, spread1)
+				} else {
+					opp = c.createOpportunity(symbol, price2, price1, spread2)
+				}
 			} else {
-				opp = c.createOpportunity(symbol, price2, price1, spread2)
+				// 都是负数，选择绝对值较小的（损失小的），并按绝对值排序
+				if math.Abs(spread1) < math.Abs(spread2) {
+					opp = c.createOpportunity(symbol, price1, price2, spread1)
+				} else {
+					opp = c.createOpportunity(symbol, price2, price1, spread2)
+				}
 			}
 
 			if opp != nil {

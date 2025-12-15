@@ -15,7 +15,11 @@
 - ✅ **精美TUI**: 基于Bubbletea的终端界面，支持实时排序和过滤
 - ✅ **即时通知**: Telegram机器人推送高价差机会
 - ✅ **高性能**: 并发处理，自动重连，过期数据过滤
-- ✅ **多交易所支持**: 当前支持Aster（现货+合约）
+- ✅ **多交易所支持**: Aster（现货+合约，196个交易对）、Lighter（永续合约，**117个活跃市场**，自动同步）
+- ✅ **跨交易所套利**: 实时监控Aster与Lighter之间的价差机会
+- ✅ **自动市场发现**: Lighter市场通过官方API自动获取，无需手动配置
+
+> 📝 **关于Lighter市场**: 通过官方API自动获取所有117个活跃市场，包括加密货币、外汇、美股等。详见 [LIGHTER_MARKETS.md](./LIGHTER_MARKETS.md)
 
 ## 🎯 监控的套利类型
 
@@ -84,6 +88,9 @@ ENABLE_NOTIFICATION=false
 # 监控参数
 MIN_SPREAD_PERCENT=0.1        # 最小价差阈值（仅影响Telegram通知）
 UPDATE_INTERVAL=1             # UI刷新间隔（秒）
+
+# Lighter配置
+LIGHTER_MARKET_REFRESH_INTERVAL=10  # Lighter市场刷新间隔（分钟），0表示禁用自动刷新
 ```
 
 ### Aster交易所配置
@@ -151,12 +158,16 @@ crypto_arbitrage_golang/
 │       └── main.go           # 应用启动、协程管理、数据流编排
 ├── internal/
 │   ├── exchange/
-│   │   └── aster/           # Aster交易所集成
-│   │       ├── auth.go      # API认证（HMAC SHA256签名）
-│   │       ├── spot.go      # 现货市场REST API
-│   │       ├── futures.go   # 合约市场REST API
-│   │       ├── websocket.go # WebSocket实时数据流
-│   │       └── utils.go     # 工具函数
+│   │   ├── aster/           # Aster交易所集成
+│   │   │   ├── auth.go      # API认证（HMAC SHA256签名）
+│   │   │   ├── spot.go      # 现货市场REST API
+│   │   │   ├── futures.go   # 合约市场REST API
+│   │   │   ├── websocket.go # WebSocket实时数据流
+│   │   │   └── utils.go     # 工具函数
+│   │   └── lighter/         # Lighter交易所集成
+│   │       ├── types.go     # WebSocket消息结构
+│   │       ├── websocket.go # WebSocket客户端
+│   │       └── markets.go   # 市场配置
 │   ├── arbitrage/
 │   │   └── calculator.go    # 套利机会计算引擎
 │   ├── notification/
@@ -180,8 +191,9 @@ crypto_arbitrage_golang/
 └─────────────────────────────────────────────────────────────┘
 
 1. 价格采集
-   ├─ WebSocket (实时) ─→ Calculator.UpdatePrice()
-   └─ REST API (每30s)  ─→ Calculator.UpdatePrice()
+   ├─ Aster WebSocket (实时) ─→ Calculator.UpdatePrice()
+   ├─ Lighter WebSocket (实时) ─→ Calculator.UpdatePrice()
+   └─ Aster REST API (每30s)  ─→ Calculator.UpdatePrice()
 
 2. 套利计算（每1秒）
    └─ Calculator.CalculateArbitrage()

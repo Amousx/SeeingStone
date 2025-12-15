@@ -26,6 +26,9 @@ type Config struct {
 	MonitorSymbols     []string // 监控的交易对
 	EnableNotification bool     // 是否启用Telegram通知
 
+	// Lighter配置
+	LighterMarketRefreshInterval int // Lighter市场刷新间隔（分钟），0表示禁用自动刷新
+
 	// 性能配置
 	MaxGoroutines int // 最大并发数
 }
@@ -50,6 +53,9 @@ func LoadConfig() *Config {
 		UpdateInterval:     getEnvInt("UPDATE_INTERVAL", 1),
 		MonitorSymbols:     getEnvArray("MONITOR_SYMBOLS", []string{"BTCUSDT", "ETHUSDT", "SOLUSDT"}),
 		EnableNotification: getEnvBool("ENABLE_NOTIFICATION", false), // 默认关闭通知避免误发
+
+		// Lighter配置
+		LighterMarketRefreshInterval: getEnvInt("LIGHTER_MARKET_REFRESH_INTERVAL", 10), // 默认10分钟刷新一次
 
 		// 性能配置
 		MaxGoroutines: getEnvInt("MAX_GOROUTINES", 100),

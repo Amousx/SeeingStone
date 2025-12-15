@@ -1,5 +1,136 @@
 # SeeingStone 更新日志
 
+## v1.2.0 - Lighter API集成 (2025-12-15)
+
+### 🎉 重大改进
+
+- **使用Lighter官方API自动获取市场配置**
+  - API endpoint: `https://mainnet.zklighter.elliot.ai/api/v1/orderBookDetails`
+  - 完全自动化，无需任何手动配置
+  - 每次启动自动获取最新的117个活跃市场
+  - 包括加密货币、外汇、美股等多种资产
+
+### ✨ 技术亮点
+
+- ✅ **100%准确** - 使用官方API，无需猜测或手动配置
+- ✅ **全面覆盖** - 自动支持所有117个Lighter活跃市场
+- ✅ **实时监控新币** - 默认每10分钟自动检测新市场并订阅（可配置）
+- ✅ **零维护成本** - 新市场上线时自动支持，完全无需人工干预
+- ✅ **Fallback机制** - API失败时使用内置配置保证程序可用
+- ✅ **灵活配置** - 可通过环境变量调整刷新间隔或禁用自动刷新
+
+### 📊 监控范围
+
+**加密货币**:
+- 主流币：BTC, ETH, SOL, BNB, ADA, XRP, LINK, DOT, AVAX, NEAR等
+- Meme币：DOGE, SHIB, PEPE, WIF, FARTCOIN等
+- DeFi代币：AAVE, UNI, CRV, DYDX等
+
+**传统资产**:
+- 外汇：USD/JPY, GBP/USD, NZD/USD等
+- 贵金属：XAU (黄金)
+- 美股：MSFT, PLTR, HOOD, COIN等
+
+### 🗑️ 移除的功能
+
+- 移除了手动市场配置（不再需要）
+- 移除了价格匹配自动发现（被官方API替代）
+
+---
+
+## v1.1.1 - Lighter市场修复 (2025-12-14)
+
+### 🐛 重要修复
+
+- **修复Lighter市场ID映射错误**
+  - 根因：Lighter使用0-indexed市场ID，原实现错误地使用了1-indexed
+  - 原先 Market 1 = BTC 实际应该是 Market 1 = BTC, Market 0 = ETH
+  - 现已启用3个市场：ETH (Market 0)、BTC (Market 1)、SOL (Market 2)
+  - 所有价格现已正确显示：ETH ~$3,121, BTC ~$89,470, SOL ~$131.5
+  - Market 5 已移除（无数据，之前误认为是ADA）
+
+### 📊 已验证的市场
+
+| Market ID | Symbol | Price Range | 状态 |
+|-----------|--------|-------------|------|
+| 0 | ETHUSDT | ~$3,121 | ✅ 正确 |
+| 1 | BTCUSDT | ~$89,470 | ✅ 正确 |
+| 2 | SOLUSDT | ~$131.5 | ✅ 正确 |
+
+### 🔍 待扩展
+
+其他10+个Lighter市场有数据但需要确认Symbol映射（Market 4, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18）
+
+---
+
+## v1.1.0 - Lighter交易所集成 (2025-12-14)
+
+### ✨ 新功能
+
+- **Lighter交易所支持**
+  - 集成Lighter永续合约市场
+  - WebSocket实时价格订阅
+  - 支持12个主流交易对（BTC, ETH, SOL, ARB, OP, AVAX等）
+  - 自动重连和keepalive机制
+
+- **跨交易所套利监控**
+  - Aster ↔ Lighter 跨交易所价差监控
+  - 同时监控现货、合约、永续合约市场
+  - 自动识别最优套利方向
+
+### 🏗️ 技术实现
+
+**新增文件**:
+- `internal/exchange/lighter/types.go` - WebSocket消息结构定义
+- `internal/exchange/lighter/websocket.go` - WebSocket客户端实现
+- `internal/exchange/lighter/markets.go` - 市场配置管理
+
+**核心特性**:
+- 订阅 `order_book/{MARKET_INDEX}` 和 `market_stats/{MARKET_INDEX}` 频道
+- 合并订单簿和市场统计数据
+- 转换为统一的 `common.Price` 格式
+- 30秒心跳保持连接活跃
+
+**数据流**:
+```
+Lighter WebSocket → OrderBookUpdate + MarketStatsUpdate
+                  → 合并数据
+                  → common.Price (Exchange: LIGHTER)
+                  → Calculator.UpdatePrice()
+                  → 跨交易所套利计算
+```
+
+### 📊 监控范围扩展
+
+- **Aster**: 196个交易对（现货+合约）
+- **Lighter**: 1个交易对（BTC永续合约）
+- **总计**: 197个交易对，跨3种市场类型
+
+### ⚠️ Lighter其他市场状态
+
+目前仅启用Lighter的BTC市场（Market ID 1），因为：
+- BTC市场的mark_price与实际价格匹配（~90000 USDC）
+- 其他市场的价格格式需要进一步确认：
+  - Market 2 (ETH): mark_price显示~133而不是~3100
+  - Market 7 (BNB): mark_price显示~2.02而不是~600-900
+  - Market 9 (DOGE): mark_price显示~13.24而不是~0.30
+
+这可能是由于价格精度、小数位或market ID映射问题。
+
+**如何扩展**: 要启用更多Lighter市场，需要：
+1. 查询Lighter API: `https://api.lighter.xyz/v1/markets` 获取准确的市场配置
+2. 确认market ID与交易对的正确映射
+3. 验证价格格式和精度设置
+
+### 🔧 集成方式
+
+基于 [Lighter官方文档](https://github.com/elliottech/lighter-go) 和 [lighter-docs](https://github.com/elliottech/lighter-docs) 严格实现：
+- WebSocket endpoint: `wss://mainnet.zklighter.elliot.ai/stream`
+- 无需认证的公开频道访问
+- 标准JSON消息格式
+
+---
+
 ## v1.0.0 - 初始版本 (2025-12-13)
 
 ### 🎉 首次发布

@@ -41,8 +41,8 @@ func NewModel(calc OpportunityGetter) Model {
 	columns := []table.Column{
 		{Title: "Symbol", Width: 15},
 		{Title: "Type", Width: 16},
-		{Title: "Buy From (LOW)", Width: 35},
-		{Title: "Sell To (HIGH)", Width: 35},
+		{Title: "Buy From", Width: 35},
+		{Title: "Sell To", Width: 35},
 		{Title: "Spread %", Width: 12},
 		{Title: "Profit $", Width: 14},
 		{Title: "Volume", Width: 14},
@@ -212,9 +212,17 @@ func (m *Model) updateTable() {
 	// 转换为表格行
 	rows := make([]table.Row, 0, len(sorted))
 	for _, opp := range sorted {
-		// 添加价格和方向提示 (LOW表示买入低价, HIGH表示卖出高价)
-		buyFrom := fmt.Sprintf("LOW %s %s @%.4f", opp.Exchange1, opp.Market1Type, opp.Price1)
-		sellTo := fmt.Sprintf("HIGH %s %s @%.4f", opp.Exchange2, opp.Market2Type, opp.Price2)
+		// 根据实际价格判断哪个是LOW，哪个是HIGH
+		var buyFrom, sellTo string
+		if opp.Price1 < opp.Price2 {
+			// Price1更低，Price1是LOW，Price2是HIGH
+			buyFrom = fmt.Sprintf("LOW %s %s @%g", opp.Exchange1, opp.Market1Type, opp.Price1)
+			sellTo = fmt.Sprintf("HIGH %s %s @%g", opp.Exchange2, opp.Market2Type, opp.Price2)
+		} else {
+			// Price2更低，Price2是LOW，Price1是HIGH
+			buyFrom = fmt.Sprintf("HIGH %s %s @%g", opp.Exchange1, opp.Market1Type, opp.Price1)
+			sellTo = fmt.Sprintf("LOW %s %s @%g", opp.Exchange2, opp.Market2Type, opp.Price2)
+		}
 
 		row := table.Row{
 			opp.Symbol,
