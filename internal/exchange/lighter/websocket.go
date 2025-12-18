@@ -111,6 +111,34 @@ func (c *WSClient) Subscribe(marketIDs []int) error {
 	return nil
 }
 
+// SubscribeAll 订阅所有市场（使用 order_book/all 和 market_stats/all）
+func (c *WSClient) SubscribeAll() error {
+	if c.Conn == nil {
+		return fmt.Errorf("websocket not connected")
+	}
+
+	// 订阅所有市场的 order book
+	orderBookSub := SubscribeMessage{
+		Type:    "subscribe",
+		Channel: "order_book/all",
+	}
+	if err := c.Conn.WriteJSON(orderBookSub); err != nil {
+		return fmt.Errorf("failed to subscribe to order_book/all: %v", err)
+	}
+
+	// 订阅所有市场的 market stats
+	marketStatsSub := SubscribeMessage{
+		Type:    "subscribe",
+		Channel: "market_stats/all",
+	}
+	if err := c.Conn.WriteJSON(marketStatsSub); err != nil {
+		return fmt.Errorf("failed to subscribe to market_stats/all: %v", err)
+	}
+
+	log.Printf("Subscribed to order_book/all and market_stats/all")
+	return nil
+}
+
 // readMessages 读取 WebSocket 消息
 func (c *WSClient) readMessages() {
 	defer func() {
@@ -180,12 +208,22 @@ func (c *WSClient) processMessage(message []byte) {
 
 // handleOrderBookUpdate 处理订单簿更新
 func (c *WSClient) handleOrderBookUpdate(update *OrderBookUpdate) {
-	// 解析 market ID
 	var marketID int
-	n, err := fmt.Sscanf(update.Channel, "order_book:%d", &marketID)
-	if err != nil || n != 1 {
-		log.Printf("Failed to parse market ID from channel '%s': err=%v, n=%d", update.Channel, err, n)
-		return
+
+	// 1. 优先从 OrderBook.MarketID 字段获取（order_book/all 返回的数据）
+	if update.OrderBook.MarketID > 0 {
+		marketID = update.OrderBook.MarketID
+	} else {
+		// 2. 从 channel 解析（order_book:123 格式）
+		n, err := fmt.Sscanf(update.Channel, "order_book:%d", &marketID)
+		if err != nil || n != 1 {
+			// 尝试其他格式 order_book/123
+			n, err = fmt.Sscanf(update.Channel, "order_book/%d", &marketID)
+			if err != nil || n != 1 {
+				log.Printf("Failed to parse market ID from channel '%s' and no market_id in data", update.Channel)
+				return
+			}
+		}
 	}
 
 	c.mu.Lock()

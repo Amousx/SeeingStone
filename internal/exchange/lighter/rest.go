@@ -40,51 +40,87 @@ var (
 	fetchErrorCount int
 )
 
-// FetchMarketData 从 REST API 获取市场数据（带重试和缓存）
+// FetchMarketData 从 REST API 获取市场数据（并发多次请求 + 合并结果）
 func FetchMarketData(apiURL string, marketIDs []int) ([]*common.Price, error) {
-	const maxRetries = 3
-	const retryDelay = 2 * time.Second
+	const parallelRequests = 3 // 并发请求数
+	const requestTimeout = 5 * time.Second
 
-	var lastErr error
+	type result struct {
+		prices []*common.Price
+		err    error
+	}
 
-	// 重试逻辑
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		prices, err := fetchMarketDataOnce(apiURL, marketIDs)
-		if err == nil {
-			// 成功获取数据
-			lastFetchTime = time.Now()
-			lastFetchCount = len(prices)
+	resultChan := make(chan result, parallelRequests)
 
-			// 更新缓存
-			priceCacheMu.Lock()
-			for _, price := range prices {
-				key := fmt.Sprintf("%s-%s-%s", price.Exchange, price.MarketType, price.Symbol)
-				priceCache[key] = price
+	// 并发发起多个请求
+	for i := 0; i < parallelRequests; i++ {
+		go func(requestID int) {
+			prices, err := fetchMarketDataOnce(apiURL, marketIDs)
+			resultChan <- result{prices: prices, err: err}
+		}(i)
+	}
+
+	// 收集结果
+	var bestResult *result
+	var allErrors []error
+	successCount := 0
+
+	// 等待所有请求完成或超时
+	timeout := time.After(requestTimeout)
+collectResults:
+	for i := 0; i < parallelRequests; i++ {
+		select {
+		case res := <-resultChan:
+			if res.err == nil {
+				successCount++
+				// 选择数据最多的结果
+				if bestResult == nil || len(res.prices) > len(bestResult.prices) {
+					bestResult = &res
+				}
+			} else {
+				allErrors = append(allErrors, res.err)
 			}
-			priceCacheMu.Unlock()
-
-			// 重置错误计数
-			if fetchErrorCount > 0 {
-				log.Printf("Lighter API recovered after %d errors", fetchErrorCount)
-				fetchErrorCount = 0
-			}
-
-			return prices, nil
-		}
-
-		lastErr = err
-		fetchErrorCount++
-
-		if attempt < maxRetries {
-			log.Printf("Lighter API attempt %d/%d failed: %v, retrying in %v...",
-				attempt, maxRetries, err, retryDelay)
-			time.Sleep(retryDelay)
+		case <-timeout:
+			log.Printf("Warning: Some Lighter API requests timed out after %v", requestTimeout)
+			break collectResults
 		}
 	}
 
-	// 所有重试都失败，使用缓存数据
-	log.Printf("Lighter API failed after %d attempts: %v, using cached data", maxRetries, lastErr)
+	// 如果有成功的请求
+	if bestResult != nil {
+		lastFetchTime = time.Now()
+		lastFetchCount = len(bestResult.prices)
 
+		// 更新缓存
+		priceCacheMu.Lock()
+		for _, price := range bestResult.prices {
+			key := fmt.Sprintf("%s-%s-%s", price.Exchange, price.MarketType, price.Symbol)
+			priceCache[key] = price
+		}
+		priceCacheMu.Unlock()
+
+		// 重置错误计数
+		if fetchErrorCount > 0 {
+			log.Printf("Lighter API recovered after %d errors", fetchErrorCount)
+			fetchErrorCount = 0
+		}
+
+		if successCount < parallelRequests {
+			log.Printf("Lighter API: %d/%d requests succeeded, using best result with %d prices",
+				successCount, parallelRequests, len(bestResult.prices))
+		}
+
+		return bestResult.prices, nil
+	}
+
+	// 所有请求都失败
+	fetchErrorCount++
+	log.Printf("Lighter API: all %d parallel requests failed", parallelRequests)
+	for i, err := range allErrors {
+		log.Printf("  Request %d error: %v", i+1, err)
+	}
+
+	// 使用缓存数据
 	priceCacheMu.RLock()
 	cachedPrices := make([]*common.Price, 0, len(priceCache))
 	for _, price := range priceCache {
@@ -101,7 +137,7 @@ func FetchMarketData(apiURL string, marketIDs []int) ([]*common.Price, error) {
 		return cachedPrices, nil
 	}
 
-	return nil, fmt.Errorf("no cached data available: %w", lastErr)
+	return nil, fmt.Errorf("all %d requests failed and no cache available", parallelRequests)
 }
 
 // fetchMarketDataOnce 执行单次 API 请求
@@ -141,9 +177,10 @@ func fetchMarketDataOnce(apiURL string, marketIDs []int) ([]*common.Price, error
 	totalMarkets := 0
 	activeMarkets := 0
 	noPrice := 0
+	fromCache := 0
 
 	// 转换为 Price 对象
-	prices := make([]*common.Price, 0)
+	prices := make([]*common.Price, 0, len(marketIDSet))
 	for _, data := range apiResp.OrderBookDetails {
 		// 只处理我们订阅的市场
 		if !marketIDSet[data.MarketID] {
@@ -151,14 +188,26 @@ func fetchMarketDataOnce(apiURL string, marketIDs []int) ([]*common.Price, error
 		}
 		totalMarkets++
 
-		// 只处理活跃市场
+		// 处理所有市场，不仅仅是 active 的（可能暂时 inactive 但仍有价值）
 		if data.Status != "active" {
+			// 尝试使用缓存
+			symbol := data.Symbol + "USDT"
+			key := fmt.Sprintf("%s-%s-%s", common.ExchangeLighter, common.MarketTypeFuture, symbol)
+
+			priceCacheMu.RLock()
+			cachedPrice, exists := priceCache[key]
+			priceCacheMu.RUnlock()
+
+			if exists && time.Since(cachedPrice.LastUpdated) < 10*time.Minute {
+				prices = append(prices, cachedPrice)
+				fromCache++
+			}
 			continue
 		}
 		activeMarkets++
 
 		lastPrice := data.LastTradePrice
-		if lastPrice == 0 {
+		if lastPrice == 0 || lastPrice < 0.0000001 {
 			noPrice++
 			// 尝试从缓存获取价格
 			symbol := data.Symbol + "USDT"
@@ -168,28 +217,19 @@ func fetchMarketDataOnce(apiURL string, marketIDs []int) ([]*common.Price, error
 			cachedPrice, exists := priceCache[key]
 			priceCacheMu.RUnlock()
 
-			if exists && time.Since(cachedPrice.LastUpdated) < 5*time.Minute {
-				// 使用缓存价格，但更新时间戳
-				price := &common.Price{
-					Symbol:      cachedPrice.Symbol,
-					Exchange:    cachedPrice.Exchange,
-					MarketType:  cachedPrice.MarketType,
-					Price:       cachedPrice.Price,
-					BidPrice:    cachedPrice.BidPrice,
-					AskPrice:    cachedPrice.AskPrice,
-					BidQty:      0,
-					AskQty:      0,
-					Volume24h:   data.DailyQuoteTokenVolume,
-					Timestamp:   time.Now(),
-					LastUpdated: cachedPrice.LastUpdated, // 保留原始更新时间
-				}
-				prices = append(prices, price)
+			if exists && time.Since(cachedPrice.LastUpdated) < 10*time.Minute {
+				// 使用缓存价格
+				prices = append(prices, cachedPrice)
+				fromCache++
 			}
 			continue
 		}
 
 		// 使用 last_trade_price 估算 bid/ask（假设 0.01% 价差）
 		spread := lastPrice * 0.0001
+		if spread < 0.00001 {
+			spread = lastPrice * 0.001 // 对于非常小的价格，使用 0.1% 价差
+		}
 		bidPrice := lastPrice - spread
 		askPrice := lastPrice + spread
 
@@ -217,10 +257,8 @@ func fetchMarketDataOnce(apiURL string, marketIDs []int) ([]*common.Price, error
 	}
 
 	// 记录详细统计
-	if noPrice > 0 || totalMarkets-activeMarkets > 0 {
-		log.Printf("Lighter API stats: total=%d, active=%d, no_price=%d, returned=%d",
-			totalMarkets, activeMarkets, noPrice, len(prices))
-	}
+	log.Printf("Lighter API: total=%d, active=%d, no_price=%d, from_cache=%d, returned=%d",
+		totalMarkets, activeMarkets, noPrice, fromCache, len(prices))
 
 	return prices, nil
 }

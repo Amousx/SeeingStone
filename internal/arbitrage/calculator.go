@@ -3,6 +3,7 @@ package arbitrage
 import (
 	"crypto-arbitrage-monitor/pkg/common"
 	"fmt"
+	"log"
 	"math"
 	"sync"
 	"time"
@@ -35,6 +36,23 @@ func (c *Calculator) UpdatePrice(price *common.Price) {
 	defer c.mu.Unlock()
 
 	key := c.makePriceKey(price.Exchange, price.MarketType, price.Symbol)
+
+	// 打印 BTC/ETH/SOL 的价格更新
+	if price.Symbol == "BTCUSDT" || price.Symbol == "ETHUSDT" || price.Symbol == "SOLUSDT" {
+		oldPrice := c.prices[key]
+		if oldPrice != nil {
+			log.Printf("[Calculator] UPDATE %s (%s-%s): Price %.2f->%.2f, LastUpdated %v->%v",
+				price.Symbol, price.Exchange, price.MarketType,
+				oldPrice.Price, price.Price,
+				oldPrice.LastUpdated.Format("15:04:05"),
+				price.LastUpdated.Format("15:04:05"))
+		} else {
+			log.Printf("[Calculator] NEW %s (%s-%s): Price=%.2f, LastUpdated=%v",
+				price.Symbol, price.Exchange, price.MarketType,
+				price.Price, price.LastUpdated.Format("15:04:05"))
+		}
+	}
+
 	c.prices[key] = price
 }
 
@@ -99,6 +117,103 @@ func (c *Calculator) GetAllPrices() []*common.Price {
 		}
 	}
 	return prices
+}
+
+// GetAllSymbols 获取所有曾经有过价格数据的币种（包括已过期的）
+func (c *Calculator) GetAllSymbols() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	symbolSet := make(map[string]bool)
+	for _, price := range c.prices {
+		symbolSet[price.Symbol] = true
+	}
+
+	symbols := make([]string, 0, len(symbolSet))
+	for symbol := range symbolSet {
+		symbols = append(symbols, symbol)
+	}
+	return symbols
+}
+
+// GetStaleSymbols 获取长时间未更新的交易对
+// threshold: 多久没更新算 stale（秒）
+func (c *Calculator) GetStaleSymbols(threshold time.Duration) map[string]time.Time {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	staleSymbols := make(map[string]time.Time)
+	now := time.Now()
+
+	// 按 symbol 分组，找出每个 symbol 的最新更新时间
+	symbolLastUpdate := make(map[string]time.Time)
+	for _, price := range c.prices {
+		if lastUpdate, exists := symbolLastUpdate[price.Symbol]; !exists || price.LastUpdated.After(lastUpdate) {
+			symbolLastUpdate[price.Symbol] = price.LastUpdated
+		}
+	}
+
+	// 找出过期的 symbol
+	for symbol, lastUpdate := range symbolLastUpdate {
+		if now.Sub(lastUpdate) > threshold {
+			staleSymbols[symbol] = lastUpdate
+		}
+	}
+
+	return staleSymbols
+}
+
+// GetCoverageStats 获取价格覆盖率统计
+func (c *Calculator) GetCoverageStats() CoverageStats {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	stats := CoverageStats{
+		TotalSymbols:     0,
+		ActiveSymbols:    0,
+		AsterSymbols:     0,
+		LighterSymbols:   0,
+		AsterWSUpdates:   0,
+		LighterWSUpdates: 0,
+	}
+
+	symbolSet := make(map[string]bool)
+	activeSymbols := make(map[string]bool)
+	asterSymbols := make(map[string]bool)
+	lighterSymbols := make(map[string]bool)
+
+	now := time.Now()
+	for _, price := range c.prices {
+		symbolSet[price.Symbol] = true
+
+		// 60秒内有更新算活跃
+		if now.Sub(price.LastUpdated) <= 60*time.Second {
+			activeSymbols[price.Symbol] = true
+
+			if price.Exchange == common.ExchangeAster {
+				asterSymbols[price.Symbol] = true
+			} else if price.Exchange == common.ExchangeLighter {
+				lighterSymbols[price.Symbol] = true
+			}
+		}
+	}
+
+	stats.TotalSymbols = len(symbolSet)
+	stats.ActiveSymbols = len(activeSymbols)
+	stats.AsterSymbols = len(asterSymbols)
+	stats.LighterSymbols = len(lighterSymbols)
+
+	return stats
+}
+
+// CoverageStats 覆盖率统计
+type CoverageStats struct {
+	TotalSymbols     int
+	ActiveSymbols    int
+	AsterSymbols     int
+	LighterSymbols   int
+	AsterWSUpdates   int
+	LighterWSUpdates int
 }
 
 // makePriceKey 生成价格键
@@ -188,6 +303,22 @@ func (c *Calculator) calculateSpread(buyPrice, sellPrice float64) float64 {
 		return 0
 	}
 	return ((sellPrice - buyPrice) / buyPrice) * 100
+}
+
+// getEffectiveAskPrice 获取有效的卖出价（Ask），如果为0则使用LastPrice
+func (c *Calculator) getEffectiveAskPrice(price *common.Price) float64 {
+	if price.AskPrice > 0 {
+		return price.AskPrice
+	}
+	return price.Price
+}
+
+// getEffectiveBidPrice 获取有效的买入价（Bid），如果为0则使用LastPrice
+func (c *Calculator) getEffectiveBidPrice(price *common.Price) float64 {
+	if price.BidPrice > 0 {
+		return price.BidPrice
+	}
+	return price.Price
 }
 
 // createOpportunity 创建套利机会

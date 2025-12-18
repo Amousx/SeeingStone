@@ -27,6 +27,7 @@ type OrderBookUpdate struct {
 
 type OrderBookData struct {
 	Code      int           `json:"code"`
+	MarketID  int           `json:"market_id,omitempty"` // 用于 order_book/all
 	Asks      []PriceLevel  `json:"asks"`
 	Bids      []PriceLevel  `json:"bids"`
 	Nonce     int64         `json:"nonce"`
