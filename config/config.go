@@ -29,6 +29,10 @@ type Config struct {
 	// Lighter配置
 	LighterMarketRefreshInterval int // Lighter市场刷新间隔（分钟），0表示禁用自动刷新
 
+	// 代理配置
+	HTTPProxy  string // HTTP 代理地址，例如: http://127.0.0.1:7890
+	HTTPSProxy string // HTTPS 代理地址，例如: http://127.0.0.1:7890
+
 	// 性能配置
 	MaxGoroutines int // 最大并发数
 }
@@ -56,6 +60,10 @@ func LoadConfig() *Config {
 
 		// Lighter配置
 		LighterMarketRefreshInterval: getEnvInt("LIGHTER_MARKET_REFRESH_INTERVAL", 10), // 默认10分钟刷新一次
+
+		// 代理配置（默认为空，不使用代理）
+		HTTPProxy:  getEnv("HTTP_PROXY", ""),
+		HTTPSProxy: getEnv("HTTPS_PROXY", ""),
 
 		// 性能配置
 		MaxGoroutines: getEnvInt("MAX_GOROUTINES", 100),

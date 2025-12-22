@@ -173,14 +173,17 @@ func (c *Calculator) GetCoverageStats() CoverageStats {
 		ActiveSymbols:    0,
 		AsterSymbols:     0,
 		LighterSymbols:   0,
+		BinanceSymbols:   0,
 		AsterWSUpdates:   0,
 		LighterWSUpdates: 0,
+		BinanceWSUpdates: 0,
 	}
 
 	symbolSet := make(map[string]bool)
 	activeSymbols := make(map[string]bool)
 	asterSymbols := make(map[string]bool)
 	lighterSymbols := make(map[string]bool)
+	binanceSymbols := make(map[string]bool)
 
 	now := time.Now()
 	for _, price := range c.prices {
@@ -194,6 +197,8 @@ func (c *Calculator) GetCoverageStats() CoverageStats {
 				asterSymbols[price.Symbol] = true
 			} else if price.Exchange == common.ExchangeLighter {
 				lighterSymbols[price.Symbol] = true
+			} else if price.Exchange == common.ExchangeBinance {
+				binanceSymbols[price.Symbol] = true
 			}
 		}
 	}
@@ -202,6 +207,7 @@ func (c *Calculator) GetCoverageStats() CoverageStats {
 	stats.ActiveSymbols = len(activeSymbols)
 	stats.AsterSymbols = len(asterSymbols)
 	stats.LighterSymbols = len(lighterSymbols)
+	stats.BinanceSymbols = len(binanceSymbols)
 
 	return stats
 }
@@ -212,8 +218,10 @@ type CoverageStats struct {
 	ActiveSymbols    int
 	AsterSymbols     int
 	LighterSymbols   int
+	BinanceSymbols   int
 	AsterWSUpdates   int
 	LighterWSUpdates int
+	BinanceWSUpdates int
 }
 
 // makePriceKey 生成价格键

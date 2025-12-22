@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"strings"
 	"sync"
 	"time"
 
@@ -253,33 +252,6 @@ func (w *WSClient) readMessages() {
 				}
 				continue
 			}
-			// 1️⃣ 先尝试解析 combined stream
-			var wsMsg WSMessage
-			if err := json.Unmarshal(message, &wsMsg); err == nil && len(wsMsg.Data) > 0 {
-
-				// MiniTicker 全市场
-				var miniTickers []*WSMiniTickerData
-				if err := json.Unmarshal(wsMsg.Data, &miniTickers); err == nil && len(miniTickers) > 0 {
-					// 打印接收到的数据数量
-					log.Printf("[Aster WS] Received %d miniTickers from stream: %s", len(miniTickers), wsMsg.Stream)
-
-					// 打印 BTC/ETH/SOL 相关的数据用于调试
-					for _, ticker := range miniTickers {
-						if ticker.Symbol == "BTCUSDT" || ticker.Symbol == "ETHUSDT" || ticker.Symbol == "SOLUSDT" {
-							log.Printf("[Aster WS] RAW %s: LastPrice=%s, Volume=%s, QuoteVolume=%s, EventTime=%d",
-								ticker.Symbol, ticker.LastPrice, ticker.Volume, ticker.QuoteVolume, ticker.EventTime)
-						}
-					}
-
-					if handler := w.miniTickerHandler; handler != nil {
-						handler(miniTickers)
-					}
-					continue
-				}
-
-				// 你未来可以在这里加：BookTicker / Ticker / Trade
-				continue
-			}
 
 			// 如果不是 combined stream 格式，尝试直接解析为 MiniTicker 数组（兼容旧格式）
 			var miniTickers []*WSMiniTickerData
@@ -377,70 +349,6 @@ func (w *WSClient) Close() {
 		w.Conn = nil
 	}
 	w.mu.Unlock()
-}
-
-// ParseBookTickerMessage 解析BookTicker消息
-func ParseBookTickerMessage(data json.RawMessage) (*WSBookTickerData, error) {
-	var ticker WSBookTickerData
-	if err := json.Unmarshal(data, &ticker); err != nil {
-		return nil, err
-	}
-	return &ticker, nil
-}
-
-// ParseTickerMessage 解析Ticker消息
-func ParseTickerMessage(data json.RawMessage) (*WSTickerData, error) {
-	var ticker WSTickerData
-	if err := json.Unmarshal(data, &ticker); err != nil {
-		return nil, err
-	}
-	return &ticker, nil
-}
-
-// ConvertWSBookTickerToPrice 将WebSocket BookTicker转换为通用价格
-func ConvertWSBookTickerToPrice(ticker *WSBookTickerData, exchange common.Exchange, marketType common.MarketType) *common.Price {
-	bidPrice := parseFloat(ticker.BidPrice)
-	askPrice := parseFloat(ticker.AskPrice)
-
-	return &common.Price{
-		Symbol:      ticker.Symbol,
-		Exchange:    exchange,
-		MarketType:  marketType,
-		Price:       (bidPrice + askPrice) / 2,
-		BidPrice:    bidPrice,
-		AskPrice:    askPrice,
-		BidQty:      parseFloat(ticker.BidQty),
-		AskQty:      parseFloat(ticker.AskQty),
-		Timestamp:   time.UnixMilli(ticker.Time),
-		LastUpdated: time.Now(),
-	}
-}
-
-// BuildBookTickerStreams 构建BookTicker流
-func BuildBookTickerStreams(symbols []string) []string {
-	streams := make([]string, len(symbols))
-	for i, symbol := range symbols {
-		streams[i] = strings.ToLower(symbol) + "@bookTicker"
-	}
-	return streams
-}
-
-// BuildTickerStreams 构建Ticker流
-func BuildTickerStreams(symbols []string) []string {
-	streams := make([]string, len(symbols))
-	for i, symbol := range symbols {
-		streams[i] = strings.ToLower(symbol) + "@ticker"
-	}
-	return streams
-}
-
-// ParseMiniTickerMessage 解析MiniTicker消息
-func ParseMiniTickerMessage(data json.RawMessage) ([]*WSMiniTickerData, error) {
-	var tickers []*WSMiniTickerData
-	if err := json.Unmarshal(data, &tickers); err != nil {
-		return nil, err
-	}
-	return tickers, nil
 }
 
 // ConvertWSMiniTickerToPrice 将WebSocket MiniTicker转换为通用价格

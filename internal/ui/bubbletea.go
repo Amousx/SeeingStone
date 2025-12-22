@@ -43,7 +43,7 @@ type UpdateOpportunitiesMsg []*common.ArbitrageOpportunity
 func NewModel(calc OpportunityGetter) Model {
 	columns := []table.Column{
 		{Title: "Symbol", Width: 15},
-		{Title: "Type", Width: 16},
+		{Title: "Pair Type", Width: 16},
 		{Title: "Buy From", Width: 35},
 		{Title: "Sell To", Width: 35},
 		{Title: "Spread %", Width: 12},
@@ -198,13 +198,22 @@ func (m Model) View() string {
 	if m.paused {
 		pausedIndicator = " | ⏸ PAUSED"
 	}
+
+	// 格式化过滤器显示
+	filterDisplay := m.filterType
+	if m.filterType == "all" {
+		filterDisplay = "All pairs"
+	} else {
+		filterDisplay = m.filterType + " only"
+	}
+
 	stats := fmt.Sprintf(
-		"Total Pairs: %d | Arbitrage Opportunities: %d | Sort: %s %s | Filter: %s | Last Update: %s%s",
+		"Total Pairs: %d | Arbitrage Opportunities: %d | Sort: %s %s | Showing: %s | Last Update: %s%s",
 		totalRows,
 		len(m.opportunities),
 		m.sortBy,
 		m.getSortDirectionSymbol(),
-		m.filterType,
+		filterDisplay,
 		m.lastUpdate.Format("15:04:05"),
 		pausedIndicator,
 	)
@@ -262,6 +271,8 @@ func (m *Model) updateTable() {
 		{common.ExchangeAster, common.MarketTypeSpot, "ASTER_SPOT"},
 		{common.ExchangeAster, common.MarketTypeFuture, "ASTER_FUTURE"},
 		{common.ExchangeLighter, common.MarketTypeFuture, "LIGHTER_FUTURE"},
+		{common.ExchangeBinance, common.MarketTypeSpot, "BINANCE_SPOT"},
+		{common.ExchangeBinance, common.MarketTypeFuture, "BINANCE_FUTURE"},
 	}
 
 	// 生成所有可能的币对组合行
@@ -286,35 +297,52 @@ func (m *Model) updateTable() {
 				price1 := prices[key1]
 				price2 := prices[key2]
 
-				// 确定市场类型字符串
-				marketType := m.getMarketTypeString(src1.marketType, src2.marketType)
-
-				// 应用过滤器
-				if !m.shouldShowMarketType(marketType) {
-					continue
-				}
-
 				// 生成 pair key，用于记录是否曾经有过数据
 				pairKey := fmt.Sprintf("%s_%s_%s_%s_%s", symbol, src1.exchange, src1.marketType, src2.exchange, src2.marketType)
 
 				// 如果两边都有价格数据，记录这个 pair
 				if price1 != nil && price2 != nil {
+					// 过滤 24h 交易量小于 100k 的代币
+					if price1.Volume24h < 100000 || price2.Volume24h < 100000 {
+						continue
+					}
+
+					// 根据价格确定实际的买卖方向和类型
+					var actualType string
+					if price1.AskPrice <= price2.BidPrice {
+						// 买 price1（src1），卖 price2（src2）
+						actualType = m.getMarketTypeString(src1.marketType, src2.marketType)
+					} else {
+						// 买 price2（src2），卖 price1（src1）
+						actualType = m.getMarketTypeString(src2.marketType, src1.marketType)
+					}
+
+					// 应用过滤器（基于实际的买卖方向）
+					if !m.shouldShowMarketType(actualType) {
+						continue
+					}
+
 					m.knownPairs[pairKey] = true
 
 					// 生成套利机会的 key
 					oppKey := fmt.Sprintf("%s_%s_%s_%s_%s", symbol, src1.exchange, src1.marketType, src2.exchange, src2.marketType)
 
-					if opp, exists := oppsByKey[oppKey]; exists {
-						// 有套利机会，显示套利数据
-						row := m.createOpportunityRow(opp, false)
-						rows = append(rows, row)
-					} else {
-						// 没有套利机会，但有价格数据，显示价格，价差为 0
-						row := m.createNoPriceSpreadRow(symbol, price1, price2, marketType, false)
-						rows = append(rows, row)
-					}
+					// 查找套利机会（如果存在）
+					opp, hasOpp := oppsByKey[oppKey]
+
+					// 创建行（使用 price1/price2 确保一致性）
+					row := m.createPairRow(symbol, price1, price2, actualType, opp, hasOpp)
+					rows = append(rows, row)
 				} else if m.knownPairs[pairKey] {
 					// 之前有过数据，但现在缺失了，显示空价格并标记为淡红色
+					// 对于缺失数据的行，使用固定的 marketType（因为无法确定价格方向）
+					marketType := m.getMarketTypeString(src1.marketType, src2.marketType)
+
+					// 应用过滤器
+					if !m.shouldShowMarketType(marketType) {
+						continue
+					}
+
 					row := m.createEmptyRow(symbol, src1, src2, price1, price2, marketType)
 					rows = append(rows, row)
 				}
@@ -329,54 +357,77 @@ func (m *Model) updateTable() {
 	m.table.SetRows(rows)
 }
 
-// createOpportunityRow 创建套利机会行
-func (m *Model) createOpportunityRow(opp *common.ArbitrageOpportunity, isMissing bool) table.Row {
-	// 根据实际价格判断哪个是LOW，哪个是HIGH
+// createPairRow 创建交易对行（统一处理有/无套利机会的情况）
+func (m *Model) createPairRow(symbol string, price1, price2 *common.Price, pairType string, opp *common.ArbitrageOpportunity, hasOpp bool) table.Row {
+	// 根据 pairType 确定买卖方向
+	// pairType 格式：买入市场-卖出市场（例如 "spot-future" = 买SPOT卖FUTURE）
+	var buyPrice, sellPrice *common.Price
 	var buyFrom, sellTo string
-	if opp.Price1 < opp.Price2 {
-		buyFrom = fmt.Sprintf("LOW %s %s @%g", opp.Exchange1, opp.Market1Type, opp.Price1)
-		sellTo = fmt.Sprintf("HIGH %s %s @%g", opp.Exchange2, opp.Market2Type, opp.Price2)
+
+	// 解析 pairType 来确定哪个是买方哪个是卖方
+	if price1.AskPrice <= price2.BidPrice {
+		// price1 便宜，买 price1，卖 price2
+		buyPrice = price1
+		sellPrice = price2
 	} else {
-		buyFrom = fmt.Sprintf("HIGH %s %s @%g", opp.Exchange1, opp.Market1Type, opp.Price1)
-		sellTo = fmt.Sprintf("LOW %s %s @%g", opp.Exchange2, opp.Market2Type, opp.Price2)
+		// price2 便宜，买 price2，卖 price1
+		buyPrice = price2
+		sellPrice = price1
+	}
+
+	// 构建显示文本
+	buyFrom = fmt.Sprintf("BUY %s %s @%g", buyPrice.Exchange, buyPrice.MarketType, buyPrice.AskPrice)
+	sellTo = fmt.Sprintf("SELL %s %s @%g", sellPrice.Exchange, sellPrice.MarketType, sellPrice.BidPrice)
+
+	// 计算价差和利润
+	var spreadPercent, profitPotential, volume float64
+	if hasOpp && opp != nil {
+		spreadPercent = opp.SpreadPercent
+		profitPotential = opp.ProfitPotential
+		volume = opp.Volume24h
+	} else {
+		// 没有套利机会，价差为 0
+		spreadPercent = 0
+		profitPotential = 0
+		volume = (price1.Volume24h + price2.Volume24h) / 2
 	}
 
 	return table.Row{
-		opp.Symbol,
-		opp.Type,
+		symbol,
+		pairType,
 		buyFrom,
 		sellTo,
-		fmt.Sprintf("%.2f%%", opp.SpreadPercent),
-		fmt.Sprintf("$%.2f", opp.ProfitPotential),
-		fmt.Sprintf("%.0f", opp.Volume24h),
+		fmt.Sprintf("%.2f%%", spreadPercent),
+		fmt.Sprintf("$%.2f", profitPotential),
+		fmt.Sprintf("%.0f", volume),
 	}
 }
 
 // createNoPriceSpreadRow 创建无价差行（有价格但无套利机会）
 func (m *Model) createNoPriceSpreadRow(symbol string, price1, price2 *common.Price, marketType string, isMissing bool) table.Row {
-	// 根据价格确定买卖方向，从而确定正确的类型
-	var from, to, actualType string
+	// 类型固定基于 price1 和 price2 的市场类型顺序，不随价格变化
+	// 这样可以确保 spot-future 和 future-spot 的稳定区分
+	var from, to string
 
+	// 根据价格确定买卖方向，但类型保持固定
 	if price1.AskPrice <= price2.BidPrice {
 		// 买 price1，卖 price2
 		from = fmt.Sprintf("BUY %s %s @%g", price1.Exchange, price1.MarketType, price1.AskPrice)
 		to = fmt.Sprintf("SELL %s %s @%g", price2.Exchange, price2.MarketType, price2.BidPrice)
-		actualType = fmt.Sprintf("%s-%s", strings.ToLower(string(price1.MarketType)), strings.ToLower(string(price2.MarketType)))
 	} else {
 		// 买 price2，卖 price1
 		from = fmt.Sprintf("BUY %s %s @%g", price2.Exchange, price2.MarketType, price2.AskPrice)
 		to = fmt.Sprintf("SELL %s %s @%g", price1.Exchange, price1.MarketType, price1.BidPrice)
-		actualType = fmt.Sprintf("%s-%s", strings.ToLower(string(price2.MarketType)), strings.ToLower(string(price1.MarketType)))
 	}
 
 	return table.Row{
 		symbol,
-		actualType,
+		marketType, // 使用固定的 marketType，不根据价格方向改变
 		from,
 		to,
 		"0.00%",
 		"$0.00",
-		fmt.Sprintf("%.0f", (price1.Volume24h + price2.Volume24h) / 2),
+		fmt.Sprintf("%.0f", (price1.Volume24h+price2.Volume24h)/2),
 	}
 }
 
@@ -389,25 +440,20 @@ func (m *Model) createEmptyRow(symbol string, src1, src2 struct {
 	// 淡红色样式
 	missingStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
 
-	// 确定实际的类型（根据价格方向）
-	var actualType string
+	// 类型固定基于 src1 和 src2 的市场类型顺序，不随价格变化
 	var from, to string
 
 	if price1 != nil && price2 != nil {
-		// 两边都有价格，根据价格方向确定类型
+		// 两边都有价格，根据价格方向确定买卖，但类型固定
 		if price1.AskPrice <= price2.BidPrice {
 			from = fmt.Sprintf("BUY %s %s @%g", price1.Exchange, price1.MarketType, price1.AskPrice)
 			to = fmt.Sprintf("SELL %s %s @%g", price2.Exchange, price2.MarketType, price2.BidPrice)
-			actualType = fmt.Sprintf("%s-%s", strings.ToLower(string(price1.MarketType)), strings.ToLower(string(price2.MarketType)))
 		} else {
 			from = fmt.Sprintf("BUY %s %s @%g", price2.Exchange, price2.MarketType, price2.AskPrice)
 			to = fmt.Sprintf("SELL %s %s @%g", price1.Exchange, price1.MarketType, price1.BidPrice)
-			actualType = fmt.Sprintf("%s-%s", strings.ToLower(string(price2.MarketType)), strings.ToLower(string(price1.MarketType)))
 		}
 	} else {
-		// 至少有一边缺失，无法确定方向，使用传入的 marketType
-		actualType = marketType
-
+		// 至少有一边缺失，无法确定方向，显示可用的价格
 		if price1 != nil {
 			from = fmt.Sprintf("%s %s @%g", price1.Exchange, price1.MarketType, price1.Price)
 		} else {
@@ -423,7 +469,7 @@ func (m *Model) createEmptyRow(symbol string, src1, src2 struct {
 
 	return table.Row{
 		missingStyle.Render(symbol),
-		missingStyle.Render(actualType),
+		missingStyle.Render(marketType), // 使用固定的 marketType
 		from,
 		to,
 		missingStyle.Render("0.00%"),
@@ -505,7 +551,7 @@ func (m Model) getSortDirectionSymbol() string {
 
 // tickCmd 定时器命令
 func tickCmd() tea.Cmd {
-	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
+	return tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
 		return TickMsg(t)
 	})
 }

@@ -4,6 +4,7 @@ import (
 	"crypto-arbitrage-monitor/config"
 	"crypto-arbitrage-monitor/internal/arbitrage"
 	"crypto-arbitrage-monitor/internal/exchange/aster"
+	"crypto-arbitrage-monitor/internal/exchange/binance"
 	"crypto-arbitrage-monitor/internal/exchange/lighter"
 	"crypto-arbitrage-monitor/internal/notification"
 	"crypto-arbitrage-monitor/internal/ui"
@@ -126,6 +127,71 @@ func main() {
 		}
 	}
 
+	// 配置 Binance 代理（如果设置）
+	if cfg.HTTPSProxy != "" {
+		binance.SetProxyURL(cfg.HTTPSProxy)
+	} else if cfg.HTTPProxy != "" {
+		binance.SetProxyURL(cfg.HTTPProxy)
+	}
+
+	// 获取 Binance 初始价格（REST API）
+	log.Println("Fetching initial Binance prices via REST API...")
+	initBinancePrices(calc)
+
+	// 创建 Binance Spot WebSocket 客户端
+	log.Println("Connecting to Binance Spot WebSocket...")
+	var binanceSpotWS *binance.WSClient
+	binanceSpotWS = binance.NewWSClient("wss://stream.binance.com:443/ws/!miniTicker@arr", common.MarketTypeSpot)
+	binanceSpotWS.SetMiniTickerHandler(func(tickers []*binance.WSMiniTickerData) {
+		for _, ticker := range tickers {
+			price := binance.ConvertWSMiniTickerToPrice(ticker, common.ExchangeBinance, common.MarketTypeSpot)
+
+			// Debug logging for BTC/ETH/SOL
+			if ticker.Symbol == "BTCUSDT" || ticker.Symbol == "ETHUSDT" || ticker.Symbol == "SOLUSDT" {
+				log.Printf("[Binance Spot] %s: Price=%.2f, Volume24h=%.2f, Timestamp=%v",
+					price.Symbol, price.Price, price.Volume24h, price.Timestamp)
+			}
+
+			calc.UpdatePrice(price)
+		}
+	})
+
+	if err := binanceSpotWS.Connect(); err != nil {
+		log.Printf("Warning: Failed to connect to Binance Spot WebSocket: %v", err)
+		log.Println("Will continue using REST API only for Binance Spot")
+		binanceSpotWS = nil
+	} else {
+		defer binanceSpotWS.Close()
+		log.Println("Binance Spot WebSocket connected and subscribed to !miniTicker@arr")
+	}
+
+	// 创建 Binance Futures WebSocket 客户端
+	log.Println("Connecting to Binance Futures WebSocket...")
+	var binanceFuturesWS *binance.WSClient
+	binanceFuturesWS = binance.NewWSClient("wss://fstream.binance.com/ws/!miniTicker@arr", common.MarketTypeFuture)
+	binanceFuturesWS.SetMiniTickerHandler(func(tickers []*binance.WSMiniTickerData) {
+		for _, ticker := range tickers {
+			price := binance.ConvertWSMiniTickerToPrice(ticker, common.ExchangeBinance, common.MarketTypeFuture)
+
+			// Debug logging for BTC/ETH/SOL
+			if ticker.Symbol == "BTCUSDT" || ticker.Symbol == "ETHUSDT" || ticker.Symbol == "SOLUSDT" {
+				log.Printf("[Binance Futures] %s: Price=%.2f, Volume24h=%.2f, Timestamp=%v",
+					price.Symbol, price.Price, price.Volume24h, price.Timestamp)
+			}
+
+			calc.UpdatePrice(price)
+		}
+	})
+
+	if err := binanceFuturesWS.Connect(); err != nil {
+		log.Printf("Warning: Failed to connect to Binance Futures WebSocket: %v", err)
+		log.Println("Will continue using REST API only for Binance Futures")
+		binanceFuturesWS = nil
+	} else {
+		defer binanceFuturesWS.Close()
+		log.Println("Binance Futures WebSocket connected and subscribed to !miniTicker@arr")
+	}
+
 	// 创建UI模型（传入calculator引用）
 	model := ui.NewModel(calc)
 	p := tea.NewProgram(model, tea.WithAltScreen())
@@ -135,7 +201,7 @@ func main() {
 
 	// 启动价差计算和通知协程
 	var wg sync.WaitGroup
-	wg.Add(5)
+	wg.Add(6)
 
 	// 协程1: Aster 智能 REST 补充刷新
 	go func() {
@@ -223,7 +289,45 @@ func main() {
 		}
 	}()
 
-	// 协程3: 定期计算价差（UI会自己获取数据）
+	// 协程3: Binance 智能 REST 补充刷新
+	go func() {
+		defer wg.Done()
+
+		// 冷启动阶段：前60秒，每5秒刷新一次（Binance 数据量大，降低频率）
+		coldStartTicker := time.NewTicker(5 * time.Second)
+		defer coldStartTicker.Stop()
+
+		for {
+			select {
+			case <-coldStartTicker.C:
+				if time.Since(startTime) < 60*time.Second {
+					// 冷启动阶段：定期全量刷新
+					log.Printf("[Cold Start] Binance REST refresh (%.0fs elapsed)", time.Since(startTime).Seconds())
+					initBinancePrices(calc)
+				} else {
+					// 切换到正常模式
+					coldStartTicker.Stop()
+					goto normalMode
+				}
+			}
+		}
+
+	normalMode:
+		// 正常阶段：每30秒检查一次，只刷新过期的 symbol
+		normalTicker := time.NewTicker(30 * time.Second)
+		defer normalTicker.Stop()
+
+		for range normalTicker.C {
+			// 获取超过30秒没更新的 Binance symbol
+			staleSymbols := calc.GetStaleSymbols(30 * time.Second)
+			if len(staleSymbols) > 0 {
+				log.Printf("[Normal] Found %d stale symbols (including Binance), refreshing via REST...", len(staleSymbols))
+				initBinancePrices(calc)
+			}
+		}
+	}()
+
+	// 协程4: 定期计算价差（UI会自己获取数据）
 	go func() {
 		defer wg.Done()
 
@@ -258,7 +362,7 @@ func main() {
 		}
 	}()
 
-	// 协程4: 监听新的套利机会并发送通知
+	// 协程5: 监听新的套利机会并发送通知
 	go func() {
 		defer wg.Done()
 		oppChan := calc.GetOpportunityChan()
@@ -276,7 +380,7 @@ func main() {
 		}
 	}()
 
-	// 协程5: Symbol 覆盖率监控
+	// 协程6: Symbol 覆盖率监控
 	go func() {
 		defer wg.Done()
 		ticker := time.NewTicker(30 * time.Second)
@@ -284,11 +388,12 @@ func main() {
 
 		for range ticker.C {
 			stats := calc.GetCoverageStats()
-			log.Printf("[Coverage] Total: %d, Active: %d, Aster: %d, Lighter: %d",
+			log.Printf("[Coverage] Total: %d, Active: %d, Aster: %d, Lighter: %d, Binance: %d",
 				stats.TotalSymbols,
 				stats.ActiveSymbols,
 				stats.AsterSymbols,
-				stats.LighterSymbols)
+				stats.LighterSymbols,
+				stats.BinanceSymbols)
 
 			// 检查覆盖率是否正常
 			if stats.ActiveSymbols < stats.TotalSymbols/2 {
@@ -380,79 +485,45 @@ func initAsterPrices(spotClient *aster.SpotClient, futuresClient *aster.FuturesC
 	wg.Wait()
 }
 
-// initPrices 初始化价格数据（保留旧版本以兼容）
-func initPrices(spotClient *aster.SpotClient, futuresClient *aster.FuturesClient, calc *arbitrage.Calculator, symbols []string) {
+// initBinancePrices 初始化 Binance 价格数据（现货 + 合约）
+func initBinancePrices(calc *arbitrage.Calculator) {
 	var wg sync.WaitGroup
+	wg.Add(2)
 
 	// 获取现货价格
-	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		tickers, err := spotClient.GetAllBookTickers()
+		prices, err := binance.FetchSpotPrices()
 		if err != nil {
-			log.Printf("Failed to fetch spot tickers: %v", err)
+			log.Printf("Failed to fetch Binance spot prices: %v", err)
 			return
 		}
 
-		// 获取24h数据
-		tickers24h, err := spotClient.GetAll24hrTickers()
-		if err != nil {
-			log.Printf("Failed to fetch spot 24h tickers: %v", err)
-			return
-		}
-
-		// 建立volume映射
-		volumeMap := make(map[string]float64)
-		for _, t := range tickers24h {
-			volumeMap[t.Symbol] = parseFloat(t.QuoteVolume)
-		}
-
-		// 更新价格
-		for _, ticker := range tickers {
-			volume := volumeMap[ticker.Symbol]
-			price := spotClient.ConvertToCommonPrice(&ticker, volume)
+		for _, price := range prices {
 			calc.UpdatePrice(price)
 		}
 
-		log.Printf("Loaded %d spot prices", len(tickers))
+		log.Printf("Loaded %d Binance spot prices", len(prices))
 	}()
 
 	// 获取合约价格
-	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		tickers, err := futuresClient.GetAllBookTickers()
+		prices, err := binance.FetchFuturesPrices()
 		if err != nil {
-			log.Printf("Failed to fetch futures tickers: %v", err)
+			log.Printf("Failed to fetch Binance futures prices: %v", err)
 			return
 		}
 
-		// 获取24h数据
-		tickers24h, err := futuresClient.GetAll24hrTickers()
-		if err != nil {
-			log.Printf("Failed to fetch futures 24h tickers: %v", err)
-			return
-		}
-
-		// 建立volume映射
-		volumeMap := make(map[string]float64)
-		for _, t := range tickers24h {
-			volumeMap[t.Symbol] = parseFloat(t.QuoteVolume)
-		}
-
-		// 更新价格
-		for _, ticker := range tickers {
-			volume := volumeMap[ticker.Symbol]
-			price := futuresClient.ConvertToCommonPrice(&ticker, volume)
+		for _, price := range prices {
 			calc.UpdatePrice(price)
 		}
 
-		log.Printf("Loaded %d futures prices", len(tickers))
+		log.Printf("Loaded %d Binance futures prices", len(prices))
 	}()
 
 	wg.Wait()
 }
-
 
 // parseFloat 解析字符串为float64
 func parseFloat(s string) float64 {
@@ -462,51 +533,3 @@ func parseFloat(s string) float64 {
 	}
 	return f
 }
-
-// getAllSymbols 获取所有可用的交易对
-func getAllSymbols(spotClient *aster.SpotClient, futuresClient *aster.FuturesClient) []string {
-	symbolMap := make(map[string]bool)
-
-	// 从现货获取交易对
-	spotInfo, err := spotClient.GetExchangeInfo()
-	if err != nil {
-		log.Printf("Warning: Failed to get spot exchange info: %v", err)
-	} else {
-		for _, symbol := range spotInfo.Symbols {
-			// 只添加状态为TRADING的交易对
-			if symbol.Status == "TRADING" {
-				symbolMap[symbol.Symbol] = true
-			}
-		}
-		log.Printf("Loaded %d spot symbols", len(spotInfo.Symbols))
-	}
-
-	// 从合约获取交易对
-	futuresInfo, err := futuresClient.GetExchangeInfo()
-	if err != nil {
-		log.Printf("Warning: Failed to get futures exchange info: %v", err)
-	} else {
-		for _, symbol := range futuresInfo.Symbols {
-			// 只添加状态为TRADING的交易对
-			if symbol.Status == "TRADING" {
-				symbolMap[symbol.Symbol] = true
-			}
-		}
-		log.Printf("Loaded %d futures symbols", len(futuresInfo.Symbols))
-	}
-
-	// 如果没有获取到任何交易对，使用默认列表
-	if len(symbolMap) == 0 {
-		log.Println("Warning: No symbols found from API, using default list")
-		return []string{"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "ADAUSDT"}
-	}
-
-	// 转换为数组
-	symbols := make([]string, 0, len(symbolMap))
-	for symbol := range symbolMap {
-		symbols = append(symbols, symbol)
-	}
-
-	return symbols
-}
-
