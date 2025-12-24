@@ -1,0 +1,800 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>自定义策略监控</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .header {
+            background: white;
+            border-radius: 10px;
+            padding: 25px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .header h1 {
+            color: #2d3748;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+
+        .nav {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+            flex-wrap: wrap;
+        }
+
+        .nav-button {
+            padding: 8px 16px;
+            background: #f7fafc;
+            color: #4a5568;
+            border: 1px solid #cbd5e0;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            text-decoration: none;
+            transition: all 0.2s;
+        }
+
+        .nav-button:hover {
+            background: #e2e8f0;
+            border-color: #a0aec0;
+        }
+
+        .nav-button.active {
+            background: #667eea;
+            color: white;
+            border-color: #667eea;
+        }
+
+        .stats {
+            display: flex;
+            gap: 20px;
+            margin-top: 15px;
+            flex-wrap: wrap;
+        }
+
+        .stat-item {
+            background: #f7fafc;
+            padding: 10px 15px;
+            border-radius: 6px;
+            border-left: 3px solid #667eea;
+        }
+
+        .stat-label {
+            font-size: 12px;
+            color: #718096;
+            margin-bottom: 5px;
+        }
+
+        .stat-value {
+            font-size: 20px;
+            font-weight: bold;
+            color: #2d3748;
+        }
+
+        .controls {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .control-group {
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .control-item {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+
+        .control-item button {
+            padding: 8px 20px;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            transition: background 0.2s;
+            align-self: flex-end;
+        }
+
+        .control-item button:hover {
+            background: #5568d3;
+        }
+
+        .auto-refresh {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .auto-refresh input[type="checkbox"] {
+            min-width: auto;
+        }
+
+        .strategy-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
+            gap: 20px;
+        }
+
+        .strategy-card {
+            background: white;
+            border-radius: 10px;
+            padding: 25px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .strategy-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: start;
+            margin-bottom: 15px;
+            padding-bottom: 15px;
+            border-bottom: 2px solid #e2e8f0;
+        }
+
+        .strategy-name {
+            font-size: 20px;
+            font-weight: 600;
+            color: #2d3748;
+            margin-bottom: 5px;
+        }
+
+        .strategy-description {
+            font-size: 13px;
+            color: #718096;
+        }
+
+        .strategy-status {
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .status-ready {
+            background: #c6f6d5;
+            color: #22543d;
+        }
+
+        .status-partial {
+            background: #feebc8;
+            color: #7c2d12;
+        }
+
+        .status-unavailable {
+            background: #fed7d7;
+            color: #742a2a;
+        }
+
+        .strategy-formula {
+            background: #f7fafc;
+            padding: 12px;
+            border-radius: 6px;
+            font-family: 'Monaco', 'Courier New', monospace;
+            font-size: 14px;
+            color: #2d3748;
+            margin-bottom: 15px;
+            border-left: 3px solid #667eea;
+        }
+
+        .strategy-value {
+            text-align: center;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 8px;
+            margin-bottom: 15px;
+        }
+
+        .value-label {
+            font-size: 12px;
+            color: rgba(255, 255, 255, 0.9);
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .value-number {
+            font-size: 36px;
+            font-weight: 700;
+            color: white;
+        }
+
+        .components-list {
+            margin-top: 15px;
+        }
+
+        .components-header {
+            font-size: 14px;
+            font-weight: 600;
+            color: #4a5568;
+            margin-bottom: 10px;
+        }
+
+        .component-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px;
+            background: #f7fafc;
+            border-radius: 6px;
+            margin-bottom: 8px;
+        }
+
+        .component-item:last-child {
+            margin-bottom: 0;
+        }
+
+        .component-info {
+            flex: 1;
+        }
+
+        .component-symbol {
+            font-size: 16px;
+            font-weight: 600;
+            color: #2d3748;
+            margin-bottom: 4px;
+        }
+
+        .component-details {
+            font-size: 12px;
+            color: #718096;
+        }
+
+        .component-coefficient {
+            font-size: 13px;
+            color: #718096;
+            margin-right: 10px;
+        }
+
+        .component-price {
+            font-size: 18px;
+            font-weight: 600;
+            color: #667eea;
+        }
+
+        .component-unavailable {
+            opacity: 0.5;
+        }
+
+        .unavailable-badge {
+            background: #fed7d7;
+            color: #c53030;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        .exchange-badge {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            margin-right: 4px;
+        }
+
+        .exchange-binance {
+            background: #f6ad55;
+            color: white;
+        }
+
+        .exchange-aster {
+            background: #4299e1;
+            color: white;
+        }
+
+        .exchange-lighter {
+            background: #48bb78;
+            color: white;
+        }
+
+        .market-badge {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 10px;
+            background: #edf2f7;
+            color: #4a5568;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #718096;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .error {
+            background: #fed7d7;
+            color: #c53030;
+            padding: 15px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+        }
+
+        .arbitrage-opportunities {
+            background: white;
+            border-radius: 10px;
+            padding: 25px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .arbitrage-title {
+            font-size: 22px;
+            font-weight: 700;
+            color: #2d3748;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .arbitrage-badge {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            color: white;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 13px;
+            font-weight: 600;
+        }
+
+        .arbitrage-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 15px;
+        }
+
+        .arbitrage-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 8px;
+            padding: 20px;
+            color: white;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .arbitrage-card::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            right: -50%;
+            width: 200%;
+            height: 200%;
+            background: radial-gradient(circle, rgba(255,255,255,0.1) 0%, transparent 70%);
+            animation: pulse 3s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); opacity: 0.5; }
+            50% { transform: scale(1.1); opacity: 0.8; }
+        }
+
+        .arbitrage-symbol {
+            font-size: 20px;
+            font-weight: 700;
+            margin-bottom: 8px;
+            position: relative;
+            z-index: 1;
+        }
+
+        .arbitrage-type {
+            font-size: 11px;
+            opacity: 0.8;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            position: relative;
+            z-index: 1;
+        }
+
+        .arbitrage-spread {
+            font-size: 32px;
+            font-weight: 700;
+            margin-bottom: 10px;
+            position: relative;
+            z-index: 1;
+        }
+
+        .arbitrage-path {
+            font-size: 13px;
+            opacity: 0.9;
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid rgba(255, 255, 255, 0.3);
+            position: relative;
+            z-index: 1;
+        }
+
+        .no-opportunities {
+            text-align: center;
+            padding: 40px;
+            color: #718096;
+            font-size: 15px;
+        }
+
+        @media (max-width: 768px) {
+            .strategy-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📊 自定义策略监控</h1>
+            <div class="nav">
+                <a href="index.html" class="nav-button">价差监控</a>
+                <a href="strategies.html" class="nav-button active">自定义策略</a>
+            </div>
+            <div class="stats">
+                <div class="stat-item">
+                    <div class="stat-label">策略总数</div>
+                    <div class="stat-value" id="strategy-count">-</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">就绪策略</div>
+                    <div class="stat-value" id="ready-count">-</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">最后更新</div>
+                    <div class="stat-value" id="last-update">-</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="controls">
+            <div class="control-group">
+                <div class="control-item">
+                    <button onclick="loadStrategies()">刷新数据</button>
+                </div>
+                <div class="control-item auto-refresh">
+                    <input type="checkbox" id="auto-refresh" onchange="toggleAutoRefresh()" checked>
+                    <label for="auto-refresh">自动刷新(5秒)</label>
+                </div>
+            </div>
+            <div style="margin-top: 15px; padding: 12px; background: #f7fafc; border-radius: 6px; font-size: 13px; color: #4a5568; border-left: 3px solid #667eea;">
+                <strong>币种筛选：</strong>
+                <button onclick="filterStrategies('all')" id="filter-all" class="filter-btn active" style="margin-left: 10px; padding: 5px 12px; border: 1px solid #cbd5e0; background: #667eea; color: white; border-radius: 4px; cursor: pointer; font-size: 12px;">全部</button>
+                <button onclick="filterStrategies('BTC')" id="filter-btc" class="filter-btn" style="margin-left: 5px; padding: 5px 12px; border: 1px solid #cbd5e0; background: white; color: #4a5568; border-radius: 4px; cursor: pointer; font-size: 12px;">BTC</button>
+                <button onclick="filterStrategies('SOL')" id="filter-sol" class="filter-btn" style="margin-left: 5px; padding: 5px 12px; border: 1px solid #cbd5e0; background: white; color: #4a5568; border-radius: 4px; cursor: pointer; font-size: 12px;">SOL</button>
+                <button onclick="filterStrategies('ETH')" id="filter-eth" class="filter-btn" style="margin-left: 5px; padding: 5px 12px; border: 1px solid #cbd5e0; background: white; color: #4a5568; border-radius: 4px; cursor: pointer; font-size: 12px;">ETH</button>
+                <button onclick="filterStrategies('STG')" id="filter-stg" class="filter-btn" style="margin-left: 5px; padding: 5px 12px; border: 1px solid #cbd5e0; background: white; color: #4a5568; border-radius: 4px; cursor: pointer; font-size: 12px;">STG-ZRO</button>
+            </div>
+            <div style="margin-top: 15px; padding: 12px; background: #f7fafc; border-radius: 6px; font-size: 13px; color: #4a5568; border-left: 3px solid #667eea;">
+                <strong>策略类型说明：</strong>
+                <span style="margin-left: 10px;">+A-B: (B Bid - A Ask) × 2 / (B Bid + A Ask) × 100%</span>
+                <span style="margin-left: 20px;">spread: (Sell Bid - Buy Ask) / Buy Ask × 100%</span>
+            </div>
+        </div>
+
+        <div id="error-message"></div>
+
+        <!-- 当前可套利策略 -->
+        <div class="arbitrage-opportunities">
+            <div class="arbitrage-title">
+                当前可套利策略
+                <span class="arbitrage-badge" id="arbitrage-count">0</span>
+            </div>
+            <div id="arbitrage-container" class="arbitrage-grid">
+                <div class="no-opportunities">正在扫描套利机会...</div>
+            </div>
+        </div>
+
+        <div id="strategies-container" class="strategy-grid">
+            <div class="loading">正在加载策略数据...</div>
+        </div>
+    </div>
+
+    <script>
+        let autoRefreshInterval = null;
+        let allStrategies = [];
+        let currentFilter = 'all';
+
+        async function loadStrategies() {
+            try {
+                const response = await fetch('/api/custom-strategies');
+                const result = await response.json();
+
+                if (result.success) {
+                    allStrategies = result.data;
+                    displayStrategies(allStrategies);
+                    updateStats(allStrategies);
+                    document.getElementById('last-update').textContent = new Date().toLocaleTimeString('zh-CN');
+                    document.getElementById('error-message').innerHTML = '';
+                } else {
+                    showError('获取策略数据失败');
+                }
+            } catch (error) {
+                showError('网络错误: ' + error.message);
+            }
+
+            // 同时加载套利机会
+            loadArbitrageOpportunities();
+        }
+
+        async function loadArbitrageOpportunities() {
+            try {
+                const response = await fetch('/api/arbitrage-opportunities');
+                const result = await response.json();
+
+                if (result.success) {
+                    displayArbitrageOpportunities(result.data);
+                    document.getElementById('arbitrage-count').textContent = result.count;
+                } else {
+                    showArbitrageError('获取套利机会失败');
+                }
+            } catch (error) {
+                showArbitrageError('网络错误: ' + error.message);
+            }
+        }
+
+        function displayArbitrageOpportunities(opportunities) {
+            const container = document.getElementById('arbitrage-container');
+
+            if (!opportunities || opportunities.length === 0) {
+                container.innerHTML = '<div class="no-opportunities">暂无符合条件的套利机会</div>';
+                return;
+            }
+
+            container.innerHTML = opportunities.map(opp => {
+                const typeText = getOpportunityTypeText(opp.type);
+                return `
+                    <div class="arbitrage-card">
+                        <div class="arbitrage-symbol">${opp.symbol}</div>
+                        <div class="arbitrage-type">${typeText}</div>
+                        <div class="arbitrage-spread">+${opp.spread_percent.toFixed(3)}%</div>
+                        <div class="arbitrage-path">
+                            <div>${opp.buy_from} → ${opp.sell_to}</div>
+                            <div style="margin-top: 5px; font-size: 12px;">${opp.description}</div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function getOpportunityTypeText(type) {
+            const typeMap = {
+                'major_coin_spread': '主流币种套利 (≥0.1%)',
+                'stg_zro_spread': 'STG-ZRO策略 (≥0.4%)',
+                'large_cap_spread': '大市值币种套利 (≥0.2%)'
+            };
+            return typeMap[type] || type;
+        }
+
+        function showArbitrageError(message) {
+            const container = document.getElementById('arbitrage-container');
+            container.innerHTML = `<div class="no-opportunities" style="color: #e53e3e;">${message}</div>`;
+        }
+
+        function updateStats(strategies) {
+            const readyCount = strategies.filter(s => s.status === 'ready').length;
+            document.getElementById('strategy-count').textContent = strategies.length;
+            document.getElementById('ready-count').textContent = readyCount;
+        }
+
+        function filterStrategies(coin) {
+            currentFilter = coin;
+
+            // 更新按钮样式
+            document.querySelectorAll('.filter-btn').forEach(btn => {
+                btn.style.background = 'white';
+                btn.style.color = '#4a5568';
+            });
+            document.getElementById('filter-' + coin.toLowerCase()).style.background = '#667eea';
+            document.getElementById('filter-' + coin.toLowerCase()).style.color = 'white';
+
+            // 筛选策略
+            let filtered = allStrategies;
+            if (coin !== 'all') {
+                filtered = allStrategies.filter(s => s.name.includes(coin));
+            }
+
+            displayStrategies(filtered);
+        }
+
+        function sortStrategies(strategies) {
+            // 按币种和价差排序
+            const coinOrder = { 'BTC': 1, 'SOL': 2, 'ETH': 3, 'STG': 4 };
+
+            return strategies.sort((a, b) => {
+                // 提取币种名称
+                const coinA = a.name.split(' ')[0];
+                const coinB = b.name.split(' ')[0];
+
+                const orderA = coinOrder[coinA] || 999;
+                const orderB = coinOrder[coinB] || 999;
+
+                if (orderA !== orderB) {
+                    return orderA - orderB;
+                }
+
+                // 同一币种按价差百分比降序
+                return (b.value_percent || 0) - (a.value_percent || 0);
+            });
+        }
+
+        function displayStrategies(strategies) {
+            const container = document.getElementById('strategies-container');
+
+            if (!strategies || strategies.length === 0) {
+                container.innerHTML = '<div class="loading">暂无策略数据</div>';
+                return;
+            }
+
+            // 排序策略
+            const sorted = sortStrategies([...strategies]);
+
+            // 按币种分组
+            const grouped = {};
+            sorted.forEach(strategy => {
+                const coin = strategy.name.split(' ')[0];
+                if (!grouped[coin]) {
+                    grouped[coin] = [];
+                }
+                grouped[coin].push(strategy);
+            });
+
+            // 生成HTML
+            let html = '';
+            Object.keys(grouped).forEach(coin => {
+                // 只在显示全部时添加分组标题
+                if (currentFilter === 'all' && grouped[coin].length > 0) {
+                    html += `
+                        <div style="grid-column: 1 / -1; padding: 15px 0; margin-top: 10px;">
+                            <h2 style="color: white; font-size: 24px; font-weight: 700; text-shadow: 0 2px 4px rgba(0,0,0,0.2);">
+                                ${coin} 价差策略
+                                <span style="font-size: 16px; opacity: 0.8; margin-left: 10px;">(${grouped[coin].length}个)</span>
+                            </h2>
+                        </div>
+                    `;
+                }
+
+                html += grouped[coin].map(strategy => `
+                    <div class="strategy-card">
+                        <div class="strategy-header">
+                            <div>
+                                <div class="strategy-name">
+                                    ${strategy.name}
+                                    <span class="market-badge" style="margin-left: 8px; font-size: 11px; background: #edf2f7; color: #4a5568;">
+                                        ${strategy.strategy_type || 'N/A'}
+                                    </span>
+                                </div>
+                                <div class="strategy-description">${strategy.description}</div>
+                            </div>
+                            <span class="strategy-status status-${strategy.status}">${getStatusText(strategy.status)}</span>
+                        </div>
+
+                        <div class="strategy-formula">${strategy.formula}</div>
+
+                        ${strategy.status === 'ready' ? `
+                            <div class="strategy-value">
+                                <div class="value-label">当前价差百分比</div>
+                                <div class="value-number">${strategy.value_percent >= 0 ? '+' : ''}${strategy.value_percent.toFixed(3)}%</div>
+                            </div>
+                            <div style="text-align: center; color: #718096; font-size: 13px; margin-top: -10px; margin-bottom: 15px;">
+                                绝对价差: $${strategy.value.toFixed(6)}
+                            </div>
+                        ` : ''}
+
+                        <div class="components-list">
+                            <div class="components-header">代币价格</div>
+                            ${strategy.components.map(component => {
+                                // 根据策略类型和系数确定价格类型
+                                // +A-B: coefficient > 0 用 ASK, coefficient < 0 用 BID
+                                // -A+B: coefficient < 0 用 BID, coefficient > 0 用 ASK
+                                const priceType = component.coefficient > 0 ? 'ASK' : 'BID';
+                                const priceColor = component.coefficient > 0 ? '#e6fffa' : '#fff5f5';
+                                const priceTextColor = component.coefficient > 0 ? '#065f46' : '#7f1d1d';
+
+                                return `
+                                    <div class="component-item ${!component.available ? 'component-unavailable' : ''}">
+                                        <div class="component-info">
+                                            <div class="component-symbol">
+                                                ${component.symbol}
+                                                <span class="component-coefficient">(${component.coefficient > 0 ? '+' : ''}${component.coefficient})</span>
+                                                ${component.available ? `
+                                                    <span class="market-badge" style="margin-left: 5px; background: ${priceColor}; color: ${priceTextColor};">
+                                                        ${priceType}
+                                                    </span>
+                                                ` : ''}
+                                            </div>
+                                            ${component.available ? `
+                                                <div class="component-details">
+                                                    <span class="exchange-badge exchange-${component.exchange.toLowerCase()}">${component.exchange}</span>
+                                                    <span class="market-badge">${component.market_type}</span>
+                                                </div>
+                                            ` : ''}
+                                        </div>
+                                        ${component.available ? `
+                                            <div class="component-price">$${component.price.toFixed(6)}</div>
+                                        ` : `
+                                            <span class="unavailable-badge">无数据</span>
+                                        `}
+                                    </div>
+                                `;
+                            }).join('')}
+                        </div>
+                    </div>
+                `).join('');
+            });
+
+            container.innerHTML = html;
+        }
+
+        function getStatusText(status) {
+            const statusMap = {
+                'ready': '就绪',
+                'partial': '部分',
+                'unavailable': '不可用'
+            };
+            return statusMap[status] || status;
+        }
+
+        function showError(message) {
+            document.getElementById('error-message').innerHTML =
+                `<div class="error">${message}</div>`;
+        }
+
+        function toggleAutoRefresh() {
+            const checkbox = document.getElementById('auto-refresh');
+            if (checkbox.checked) {
+                autoRefreshInterval = setInterval(loadStrategies, 5000);
+            } else {
+                if (autoRefreshInterval) {
+                    clearInterval(autoRefreshInterval);
+                    autoRefreshInterval = null;
+                }
+            }
+        }
+
+        // 初始加载
+        window.onload = function() {
+            loadStrategies();
+            // 如果自动刷新复选框被选中，启动自动刷新
+            const checkbox = document.getElementById('auto-refresh');
+            if (checkbox.checked) {
+                autoRefreshInterval = setInterval(loadStrategies, 5000);
+            }
+        };
+    </script>
+</body>
+</html>

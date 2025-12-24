@@ -25,9 +25,9 @@ echo 代理配置: %HTTPS_PROXY%
 echo.
 
 REM 检查程序文件是否存在
-if not exist "monitor.exe" (
+if not exist "crypto-monitor.exe" (
     echo [错误] monitor.exe 不存在，请先编译程序
-    echo 运行命令: go build -o monitor.exe cmd/monitor/main.go
+    echo 运行命令: go build -o crypto-monitor.exe cmd/monitor/main.go
     pause
     exit /b 1
 )
@@ -36,7 +36,7 @@ echo [启动] 正在启动监控程序...
 echo.
 
 REM 运行程序
-monitor.exe
+crypto-monitor.exe
 
 echo.
 echo [退出] 程序已结束

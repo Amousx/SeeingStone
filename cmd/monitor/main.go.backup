@@ -1,19 +1,15 @@
 package main
 
 import (
-	"context"
 	"crypto-arbitrage-monitor/config"
 	"crypto-arbitrage-monitor/internal/exchange/aster"
 	"crypto-arbitrage-monitor/internal/exchange/binance"
 	"crypto-arbitrage-monitor/internal/exchange/lighter"
 	"crypto-arbitrage-monitor/internal/pricestore"
-	"crypto-arbitrage-monitor/internal/web"
 	"crypto-arbitrage-monitor/pkg/common"
 	"log"
 	"os"
-	"os/exec"
 	"os/signal"
-	"runtime"
 	"strconv"
 	"sync"
 	"syscall"
@@ -38,9 +34,7 @@ func main() {
 
 	// 启动Aster WebSocket
 	asterWS := startAsterWebSocket(store)
-	if asterWS != nil {
-		defer asterWS.Close()
-	}
+	defer asterWS.Close()
 
 	// 启动Aster REST初始化和定期更新
 	asterSpotClient := aster.NewSpotClient(cfg.AsterSpotBaseURL, cfg.AsterAPIKey, cfg.AsterSecretKey)
@@ -55,11 +49,6 @@ func main() {
 		defer lighterWS.Close()
 	}
 
-	// Binance（可选，需要代理）
-	var binanceSpotWS *binance.WSClient
-	var binanceFuturesWS *binance.WSClient
-
-	log.Println("[Binance] Enabled")
 	// 配置Binance代理
 	if cfg.HTTPSProxy != "" {
 		binance.SetProxyURL(cfg.HTTPSProxy)
@@ -68,31 +57,15 @@ func main() {
 	}
 
 	// 启动Binance WebSocket
-	binanceSpotWS = startBinanceSpotWebSocket(store)
+	binanceSpotWS := startBinanceSpotWebSocket(store)
 	if binanceSpotWS != nil {
 		defer binanceSpotWS.Close()
 	}
 
-	binanceFuturesWS = startBinanceFuturesWebSocket(store)
+	binanceFuturesWS := startBinanceFuturesWebSocket(store)
 	if binanceFuturesWS != nil {
 		defer binanceFuturesWS.Close()
 	}
-
-	// 启动Web服务器
-	webServer := web.NewServer(store, ":8080")
-	go func() {
-		if err := webServer.Start(); err != nil {
-			log.Printf("[Web Server] Error: %v", err)
-		}
-	}()
-	log.Println("[Web Server] Access at http://localhost:8080")
-	println("[Web Server] Access at http://localhost:8080")
-
-	// 等待一小段时间确保服务器启动，然后自动打开浏览器
-	go func() {
-		time.Sleep(500 * time.Millisecond)
-		openBrowser("http://localhost:8080/")
-	}()
 
 	// 启动后台任务
 	var wg sync.WaitGroup
@@ -112,7 +85,7 @@ func main() {
 		runLighterRESTUpdater(lighterAPIBaseURL, marketIDs, store, stopChan)
 	}()
 
-	// 任务3: Binance REST数据获取（可选）
+	// 任务3: Binance REST数据获取
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -246,174 +219,119 @@ func startBinanceFuturesWebSocket(store *pricestore.PriceStore) *binance.WSClien
 	return binanceFuturesWS
 }
 
-// runAsterRESTUpdater 运行Aster REST API更新任务（状态机模式，带context和timeout）
+// runAsterRESTUpdater 运行Aster REST API更新任务
 func runAsterRESTUpdater(spotClient *aster.SpotClient, futuresClient *aster.FuturesClient, store *pricestore.PriceStore, stopChan <-chan struct{}) {
-	const (
-		stateColdStart = iota
-		stateNormal
-	)
+	// 立即执行一次初始化
+	fetchAsterPrices(spotClient, futuresClient, store)
 
-	// 立即执行一次初始化（带timeout）
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	fetchAsterPrices(ctx, spotClient, futuresClient, store)
-	cancel()
-
-	state := stateColdStart
+	// 冷启动阶段：前60秒每5秒更新一次
+	coldStartTicker := time.NewTicker(5 * time.Second)
 	startTime := time.Now()
 
-	coldStartInterval := 2 * time.Second
-	normalInterval := 30 * time.Second
+	for {
+		select {
+		case <-stopChan:
+			coldStartTicker.Stop()
+			return
+		case <-coldStartTicker.C:
+			if time.Since(startTime) < 60*time.Second {
+				fetchAsterPrices(spotClient, futuresClient, store)
+			} else {
+				coldStartTicker.Stop()
+				goto normalMode
+			}
+		}
+	}
 
-	ticker := time.NewTicker(coldStartInterval)
-	defer ticker.Stop()
+normalMode:
+	// 正常阶段：每30秒更新一次
+	normalTicker := time.NewTicker(30 * time.Second)
+	defer normalTicker.Stop()
 
 	for {
 		select {
 		case <-stopChan:
 			return
-
-		case <-ticker.C:
-			// 状态转换
-			if state == stateColdStart && time.Since(startTime) >= 60*time.Second {
-				state = stateNormal
-				ticker.Reset(normalInterval)
-				log.Println("[Aster REST] Switched to normal mode")
-			}
-
-			// 执行更新（带timeout和可中断）
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-
-			// 在goroutine中执行，允许被stopChan中断
-			done := make(chan struct{})
-			go func() {
-				fetchAsterPrices(ctx, spotClient, futuresClient, store)
-				close(done)
-			}()
-
-			select {
-			case <-done:
-				cancel()
-			case <-stopChan:
-				cancel()
-				return
-			case <-ctx.Done():
-				cancel()
-				log.Println("[Aster REST] Fetch timeout")
-			}
+		case <-normalTicker.C:
+			fetchAsterPrices(spotClient, futuresClient, store)
 		}
 	}
 }
 
-// runLighterRESTUpdater 运行Lighter REST API更新任务（状态机模式）
+// runLighterRESTUpdater 运行Lighter REST API更新任务
 func runLighterRESTUpdater(apiBaseURL string, marketIDs []int, store *pricestore.PriceStore, stopChan <-chan struct{}) {
-	const (
-		stateColdStart = iota
-		stateNormal
-	)
-
 	// 立即执行一次初始化
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	fetchLighterPrices(ctx, apiBaseURL, marketIDs, store)
-	cancel()
+	fetchLighterPrices(apiBaseURL, marketIDs, store)
 
-	state := stateColdStart
+	// 冷启动阶段：前60秒每5s更新一次
+	coldStartTicker := time.NewTicker(5 * time.Second)
 	startTime := time.Now()
 
-	coldStartInterval := 2 * time.Second
-	normalInterval := 30 * time.Second
+	for {
+		select {
+		case <-stopChan:
+			coldStartTicker.Stop()
+			return
+		case <-coldStartTicker.C:
+			if time.Since(startTime) < 60*time.Second {
+				fetchLighterPrices(apiBaseURL, marketIDs, store)
+			} else {
+				coldStartTicker.Stop()
+				goto normalMode
+			}
+		}
+	}
 
-	ticker := time.NewTicker(coldStartInterval)
-	defer ticker.Stop()
+normalMode:
+	// 正常阶段：每30秒更新一次
+	normalTicker := time.NewTicker(30 * time.Second)
+	defer normalTicker.Stop()
 
 	for {
 		select {
 		case <-stopChan:
 			return
-
-		case <-ticker.C:
-			// 状态转换
-			if state == stateColdStart && time.Since(startTime) >= 60*time.Second {
-				state = stateNormal
-				ticker.Reset(normalInterval)
-				log.Println("[Lighter REST] Switched to normal mode")
-			}
-
-			// 执行更新（带timeout和可中断）
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-
-			done := make(chan struct{})
-			go func() {
-				fetchLighterPrices(ctx, apiBaseURL, marketIDs, store)
-				close(done)
-			}()
-
-			select {
-			case <-done:
-				cancel()
-			case <-stopChan:
-				cancel()
-				return
-			case <-ctx.Done():
-				cancel()
-				log.Println("[Lighter REST] Fetch timeout")
-			}
+		case <-normalTicker.C:
+			fetchLighterPrices(apiBaseURL, marketIDs, store)
 		}
 	}
 }
 
-// runBinanceRESTUpdater 运行Binance REST API更新任务（状态机模式）
+// runBinanceRESTUpdater 运行Binance REST API更新任务
 func runBinanceRESTUpdater(store *pricestore.PriceStore, stopChan <-chan struct{}) {
-	const (
-		stateColdStart = iota
-		stateNormal
-	)
-
 	// 立即执行一次初始化
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	fetchBinancePrices(ctx, store)
-	cancel()
+	fetchBinancePrices(store)
 
-	state := stateColdStart
+	// 冷启动阶段：前60秒每10秒更新一次
+	coldStartTicker := time.NewTicker(10 * time.Second)
 	startTime := time.Now()
 
-	coldStartInterval := 5 * time.Second
-	normalInterval := 60 * time.Second
+	for {
+		select {
+		case <-stopChan:
+			coldStartTicker.Stop()
+			return
+		case <-coldStartTicker.C:
+			if time.Since(startTime) < 60*time.Second {
+				fetchBinancePrices(store)
+			} else {
+				coldStartTicker.Stop()
+				goto normalMode
+			}
+		}
+	}
 
-	ticker := time.NewTicker(coldStartInterval)
-	defer ticker.Stop()
+normalMode:
+	// 正常阶段：每60秒更新一次
+	normalTicker := time.NewTicker(60 * time.Second)
+	defer normalTicker.Stop()
 
 	for {
 		select {
 		case <-stopChan:
 			return
-
-		case <-ticker.C:
-			// 状态转换
-			if state == stateColdStart && time.Since(startTime) >= 60*time.Second {
-				state = stateNormal
-				ticker.Reset(normalInterval)
-				log.Println("[Binance REST] Switched to normal mode")
-			}
-
-			// 执行更新（带timeout和可中断）
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-
-			done := make(chan struct{})
-			go func() {
-				fetchBinancePrices(ctx, store)
-				close(done)
-			}()
-
-			select {
-			case <-done:
-				cancel()
-			case <-stopChan:
-				cancel()
-				return
-			case <-ctx.Done():
-				cancel()
-				log.Println("[Binance REST] Fetch timeout")
-			}
+		case <-normalTicker.C:
+			fetchBinancePrices(store)
 		}
 	}
 }
@@ -459,10 +377,9 @@ func runDataCleaner(store *pricestore.PriceStore, stopChan <-chan struct{}) {
 	}
 }
 
-// fetchAsterPrices 获取Aster价格数据（支持context取消）
-func fetchAsterPrices(ctx context.Context, spotClient *aster.SpotClient, futuresClient *aster.FuturesClient, store *pricestore.PriceStore) {
+// fetchAsterPrices 获取Aster价格数据
+func fetchAsterPrices(spotClient *aster.SpotClient, futuresClient *aster.FuturesClient, store *pricestore.PriceStore) {
 	var wg sync.WaitGroup
-	doneChan := make(chan struct{})
 
 	// 获取现货价格
 	wg.Add(1)
@@ -524,53 +441,27 @@ func fetchAsterPrices(ctx context.Context, spotClient *aster.SpotClient, futures
 		log.Printf("[Aster Futures] Fetched %d prices", len(tickers))
 	}()
 
-	// 等待完成或context取消
-	go func() {
-		wg.Wait()
-		close(doneChan)
-	}()
-
-	select {
-	case <-doneChan:
-		// 正常完成
-	case <-ctx.Done():
-		// Context取消，等待goroutines完成（但不会阻塞太久）
-		log.Println("[Aster] Fetch cancelled by context")
-	}
+	wg.Wait()
 }
 
-// fetchLighterPrices 获取Lighter价格数据（支持context取消）
-func fetchLighterPrices(ctx context.Context, apiBaseURL string, marketIDs []int, store *pricestore.PriceStore) {
-	done := make(chan struct{})
-
-	go func() {
-		prices, err := lighter.FetchMarketData(apiBaseURL, marketIDs)
-		if err != nil {
-			log.Printf("[Lighter] Failed to fetch prices: %v", err)
-			close(done)
-			return
-		}
-
-		for _, price := range prices {
-			store.UpdatePrice(price)
-		}
-
-		log.Printf("[Lighter] Fetched %d prices", len(prices))
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		// 正常完成
-	case <-ctx.Done():
-		log.Println("[Lighter] Fetch cancelled by context")
+// fetchLighterPrices 获取Lighter价格数据
+func fetchLighterPrices(apiBaseURL string, marketIDs []int, store *pricestore.PriceStore) {
+	prices, err := lighter.FetchMarketData(apiBaseURL, marketIDs)
+	if err != nil {
+		log.Printf("[Lighter] Failed to fetch prices: %v", err)
+		return
 	}
+
+	for _, price := range prices {
+		store.UpdatePrice(price)
+	}
+
+	log.Printf("[Lighter] Fetched %d prices", len(prices))
 }
 
-// fetchBinancePrices 获取Binance价格数据（支持context取消）
-func fetchBinancePrices(ctx context.Context, store *pricestore.PriceStore) {
+// fetchBinancePrices 获取Binance价格数据
+func fetchBinancePrices(store *pricestore.PriceStore) {
 	var wg sync.WaitGroup
-	doneChan := make(chan struct{})
 
 	// 获取现货价格
 	wg.Add(1)
@@ -606,18 +497,7 @@ func fetchBinancePrices(ctx context.Context, store *pricestore.PriceStore) {
 		log.Printf("[Binance Futures] Fetched %d prices", len(prices))
 	}()
 
-	// 等待完成或context取消
-	go func() {
-		wg.Wait()
-		close(doneChan)
-	}()
-
-	select {
-	case <-doneChan:
-		// 正常完成
-	case <-ctx.Done():
-		log.Println("[Binance] Fetch cancelled by context")
-	}
+	wg.Wait()
 }
 
 // parseFloat 解析字符串为float64
@@ -627,25 +507,4 @@ func parseFloat(s string) float64 {
 		return 0
 	}
 	return f
-}
-
-// openBrowser 根据操作系统打开默认浏览器
-func openBrowser(url string) {
-	var cmd *exec.Cmd
-
-	switch runtime.GOOS {
-	case "windows":
-		cmd = exec.Command("cmd", "/c", "start", url)
-	case "darwin":
-		cmd = exec.Command("open", url)
-	default: // linux, freebsd, openbsd, netbsd
-		cmd = exec.Command("xdg-open", url)
-	}
-
-	err := cmd.Start()
-	if err != nil {
-		log.Printf("[Browser] Failed to open browser: %v", err)
-	} else {
-		log.Printf("[Browser] Opening %s in default browser", url)
-	}
 }
