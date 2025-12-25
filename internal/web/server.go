@@ -38,6 +38,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/stats", s.handleStats)
 	mux.HandleFunc("/api/custom-strategies", s.handleCustomStrategies)
 	mux.HandleFunc("/api/arbitrage-opportunities", s.handleArbitrageOpportunities)
+	mux.HandleFunc("/api/debug/prices", s.handleDebugPrices)
 
 	// Static files - 使用子文件系统来正确访问 static 目录
 	staticDir, err := fs.Sub(staticFS, "static")
@@ -178,6 +179,53 @@ func (s *Server) handleArbitrageOpportunities(w http.ResponseWriter, r *http.Req
 		"success": true,
 		"count":   len(opportunities),
 		"data":    opportunities,
+	})
+}
+
+// handleDebugPrices 调试端点：显示各个交易所的原始价格数据样本
+func (s *Server) handleDebugPrices(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// 获取每个交易所的样本数据
+	exchangeSamples := make(map[string][]map[string]interface{})
+
+	// 获取所有活跃价格
+	activePrices := s.store.GetActivePrices(60 * time.Second)
+
+	// 按交易所分组并取样本
+	for _, price := range activePrices {
+		exchangeName := string(price.Exchange)
+
+		// 每个交易所最多显示5个样本
+		if len(exchangeSamples[exchangeName]) < 5 {
+			sample := map[string]interface{}{
+				"symbol":       price.Symbol,
+				"exchange":     price.Exchange,
+				"market_type":  price.MarketType,
+				"price":        price.Price,
+				"bid_price":    price.BidPrice,
+				"ask_price":    price.AskPrice,
+				"volume_24h":   price.Volume24h,
+				"source":       price.Source,
+				"timestamp":    price.Timestamp,
+				"last_updated": price.LastUpdated,
+			}
+			exchangeSamples[exchangeName] = append(exchangeSamples[exchangeName], sample)
+		}
+	}
+
+	// 统计信息
+	stats := s.store.GetStats()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":         true,
+		"total_prices":    len(activePrices),
+		"by_exchange":     stats.ByExchange,
+		"samples":         exchangeSamples,
 	})
 }
 

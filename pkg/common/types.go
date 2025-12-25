@@ -23,19 +23,28 @@ const (
 	ExchangeLighter     Exchange = "LIGHTER"
 )
 
+// PriceSource 价格数据来源
+type PriceSource string
+
+const (
+	PriceSourceWebSocket PriceSource = "WEBSOCKET" // WebSocket实时数据
+	PriceSourceREST      PriceSource = "REST"      // REST API数据
+)
+
 // Price 价格信息
 type Price struct {
-	Symbol      string     `json:"symbol"`
-	Exchange    Exchange   `json:"exchange"`
-	MarketType  MarketType `json:"market_type"`
-	Price       float64    `json:"price"`
-	BidPrice    float64    `json:"bid_price"`
-	AskPrice    float64    `json:"ask_price"`
-	BidQty      float64    `json:"bid_qty"`
-	AskQty      float64    `json:"ask_qty"`
-	Volume24h   float64    `json:"volume_24h"`
-	Timestamp   time.Time  `json:"timestamp"`
-	LastUpdated time.Time  `json:"last_updated"`
+	Symbol      string      `json:"symbol"`
+	Exchange    Exchange    `json:"exchange"`
+	MarketType  MarketType  `json:"market_type"`
+	Price       float64     `json:"price"`        // 中间价或标记价
+	BidPrice    float64     `json:"bid_price"`    // 买一价（真实bid，不是伪造）
+	AskPrice    float64     `json:"ask_price"`    // 卖一价（真实ask，不是伪造）
+	BidQty      float64     `json:"bid_qty"`      // 买一量
+	AskQty      float64     `json:"ask_qty"`      // 卖一量
+	Volume24h   float64     `json:"volume_24h"`   // 24h成交量
+	Timestamp   time.Time   `json:"timestamp"`    // 交易所行情时间（关键！）
+	LastUpdated time.Time   `json:"last_updated"` // 本地接收时间（用于过期判断）
+	Source      PriceSource `json:"source"`       // 数据来源：WebSocket或REST
 }
 
 // ArbitrageOpportunity 套利机会

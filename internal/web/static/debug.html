@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>数据诊断 - 加密货币监控</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .header {
+            background: white;
+            border-radius: 10px;
+            padding: 25px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .header h1 {
+            color: #2d3748;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+
+        .nav {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+        }
+
+        .nav-button {
+            padding: 8px 16px;
+            background: #f7fafc;
+            color: #4a5568;
+            text-decoration: none;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+
+        .nav-button:hover {
+            background: #667eea;
+            color: white;
+        }
+
+        .nav-button.active {
+            background: #667eea;
+            color: white;
+        }
+
+        .stats {
+            display: flex;
+            gap: 20px;
+            margin-top: 15px;
+            flex-wrap: wrap;
+        }
+
+        .stat-item {
+            background: #f7fafc;
+            padding: 10px 15px;
+            border-radius: 6px;
+            border-left: 3px solid #667eea;
+        }
+
+        .stat-label {
+            font-size: 12px;
+            color: #718096;
+            margin-bottom: 5px;
+        }
+
+        .stat-value {
+            font-size: 20px;
+            font-weight: bold;
+            color: #2d3748;
+        }
+
+        .section {
+            background: white;
+            border-radius: 10px;
+            padding: 25px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .section-title {
+            font-size: 18px;
+            font-weight: 700;
+            color: #2d3748;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #e2e8f0;
+        }
+
+        .exchange-section {
+            margin-bottom: 30px;
+        }
+
+        .exchange-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+
+        .exchange-badge {
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 600;
+            color: white;
+        }
+
+        .exchange-binance {
+            background: #f6ad55;
+        }
+
+        .exchange-aster {
+            background: #4299e1;
+        }
+
+        .exchange-lighter {
+            background: #48bb78;
+        }
+
+        .sample-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 15px;
+        }
+
+        .sample-card {
+            background: #f7fafc;
+            border-radius: 6px;
+            padding: 15px;
+            border: 1px solid #e2e8f0;
+        }
+
+        .sample-symbol {
+            font-size: 16px;
+            font-weight: 700;
+            color: #2d3748;
+            margin-bottom: 10px;
+        }
+
+        .sample-detail {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 5px;
+            font-size: 13px;
+        }
+
+        .sample-label {
+            color: #718096;
+        }
+
+        .sample-value {
+            color: #2d3748;
+            font-weight: 500;
+        }
+
+        .alert {
+            background: #fed7d7;
+            color: #c53030;
+            padding: 12px;
+            border-radius: 6px;
+            margin-top: 10px;
+            font-size: 13px;
+        }
+
+        .success {
+            background: #c6f6d5;
+            color: #22543d;
+            padding: 12px;
+            border-radius: 6px;
+            margin-top: 10px;
+            font-size: 13px;
+        }
+
+        button {
+            padding: 10px 20px;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            transition: background 0.2s;
+        }
+
+        button:hover {
+            background: #5568d3;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔍 数据诊断</h1>
+            <div class="nav">
+                <a href="index.html" class="nav-button">价差监控</a>
+                <a href="strategies.html" class="nav-button">自定义策略</a>
+                <a href="debug.html" class="nav-button active">数据诊断</a>
+            </div>
+            <div class="stats">
+                <div class="stat-item">
+                    <div class="stat-label">总价格数</div>
+                    <div class="stat-value" id="total-prices">-</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">Binance</div>
+                    <div class="stat-value" id="binance-count" style="color: #f6ad55;">-</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">Aster</div>
+                    <div class="stat-value" id="aster-count" style="color: #4299e1;">-</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">Lighter (盘前)</div>
+                    <div class="stat-value" id="lighter-count" style="color: #48bb78;">-</div>
+                </div>
+            </div>
+            <button onclick="loadData()" style="margin-top: 15px;">刷新数据</button>
+        </div>
+
+        <div id="data-container"></div>
+    </div>
+
+    <script>
+        async function loadData() {
+            try {
+                const response = await fetch('/api/debug/prices');
+                const result = await response.json();
+
+                if (result.success) {
+                    document.getElementById('total-prices').textContent = result.total_prices;
+                    document.getElementById('binance-count').textContent = result.by_exchange['BINANCE'] || 0;
+                    document.getElementById('aster-count').textContent = result.by_exchange['ASTER'] || 0;
+                    document.getElementById('lighter-count').textContent = result.by_exchange['LIGHTER'] || 0;
+
+                    displaySamples(result.samples, result.by_exchange);
+                }
+            } catch (error) {
+                console.error('Failed to load data:', error);
+            }
+        }
+
+        function displaySamples(samples, byExchange) {
+            const container = document.getElementById('data-container');
+            let html = '';
+
+            for (const [exchange, data] of Object.entries(samples)) {
+                const count = byExchange[exchange] || 0;
+                const exchangeClass = `exchange-${exchange.toLowerCase()}`;
+
+                html += `
+                    <div class="section exchange-section">
+                        <div class="exchange-header">
+                            <span class="exchange-badge ${exchangeClass}">${exchange}</span>
+                            <span style="color: #718096;">${count} prices</span>
+                        </div>
+                        ${count === 0 ? '<div class="alert">⚠️ 该交易所没有数据！请检查连接。</div>' : ''}
+                        ${count > 0 && data.length === 0 ? '<div class="alert">⚠️ 有数据但无法显示样本</div>' : ''}
+                        ${data.length > 0 ? generateSampleGrid(data) : ''}
+                        ${count > 0 && checkDataQuality(data)}
+                    </div>
+                `;
+            }
+
+            container.innerHTML = html;
+        }
+
+        function generateSampleGrid(samples) {
+            return `
+                <div class="sample-grid">
+                    ${samples.map(sample => `
+                        <div class="sample-card">
+                            <div class="sample-symbol">${sample.symbol}</div>
+                            <div class="sample-detail">
+                                <span class="sample-label">市场类型:</span>
+                                <span class="sample-value">${sample.market_type}</span>
+                            </div>
+                            <div class="sample-detail">
+                                <span class="sample-label">Price:</span>
+                                <span class="sample-value">$${sample.price.toFixed(4)}</span>
+                            </div>
+                            <div class="sample-detail">
+                                <span class="sample-label">Bid:</span>
+                                <span class="sample-value">${sample.bid_price === 0 ? '❌ 无' : '$' + sample.bid_price.toFixed(4)}</span>
+                            </div>
+                            <div class="sample-detail">
+                                <span class="sample-label">Ask:</span>
+                                <span class="sample-value">${sample.ask_price === 0 ? '❌ 无' : '$' + sample.ask_price.toFixed(4)}</span>
+                            </div>
+                            <div class="sample-detail">
+                                <span class="sample-label">24h Volume:</span>
+                                <span class="sample-value">${formatVolume(sample.volume_24h)}</span>
+                            </div>
+                            <div class="sample-detail">
+                                <span class="sample-label">数据源:</span>
+                                <span class="sample-value">${sample.source}</span>
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>
+            `;
+        }
+
+        function checkDataQuality(samples) {
+            const hasBidAsk = samples.some(s => s.bid_price > 0 && s.ask_price > 0);
+            const noBidAsk = samples.every(s => s.bid_price === 0 && s.ask_price === 0);
+
+            if (noBidAsk) {
+                return '<div class="alert">⚠️ 所有样本都没有真实的 bid/ask 价格，使用 Price 字段计算价差</div>';
+            } else if (!hasBidAsk) {
+                return '<div class="alert">⚠️ 部分样本缺少真实的 bid/ask 价格</div>';
+            } else {
+                return '<div class="success">✅ 数据质量良好，包含真实的 bid/ask 价格</div>';
+            }
+        }
+
+        function formatVolume(volume) {
+            if (volume >= 1000000) {
+                return '$' + (volume / 1000000).toFixed(2) + 'M';
+            } else if (volume >= 1000) {
+                return '$' + (volume / 1000).toFixed(2) + 'K';
+            }
+            return '$' + volume.toFixed(2);
+        }
+
+        // 初始加载
+        window.onload = function() {
+            loadData();
+            // 每30秒自动刷新
+            setInterval(loadData, 30000);
+        };
+    </script>
+</body>
+</html>

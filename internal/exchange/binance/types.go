@@ -6,7 +6,20 @@ import (
 	"time"
 )
 
-// WSMiniTickerData WebSocket MiniTicker 数据
+// WSBookTickerData WebSocket BookTicker 数据（实时最优买卖价）
+type WSBookTickerData struct {
+	EventType string `json:"e"` // 事件类型 "bookTicker"
+	UpdateID  int64  `json:"u"` // Order book updateId
+	EventTime int64  `json:"E"` // 事件推送时间（毫秒）
+	TxnTime   int64  `json:"T"` // 撮合时间（毫秒）- 期货有此字段
+	Symbol    string `json:"s"` // 交易对
+	BidPrice  string `json:"b"` // 最优买价（真实bid）
+	BidQty    string `json:"B"` // 最优买量
+	AskPrice  string `json:"a"` // 最优卖价（真实ask）
+	AskQty    string `json:"A"` // 最优卖量
+}
+
+// WSMiniTickerData WebSocket MiniTicker 数据（仅用于获取24h成交量）
 type WSMiniTickerData struct {
 	EventType   string `json:"e"` // 事件类型: 24hrMiniTicker
 	EventTime   int64  `json:"E"` // 事件时间 (毫秒)
@@ -62,7 +75,44 @@ type SymbolInfo struct {
 	QuoteAsset string `json:"quoteAsset"`
 }
 
-// ConvertWSMiniTickerToPrice 将 WebSocket MiniTicker 转换为通用 Price
+// ConvertWSBookTickerToPrice 将 WebSocket BookTicker 转换为通用 Price（推荐使用）
+func ConvertWSBookTickerToPrice(ticker *WSBookTickerData, exchange common.Exchange, marketType common.MarketType) *common.Price {
+	bidPrice := parseFloat(ticker.BidPrice)
+	askPrice := parseFloat(ticker.AskPrice)
+	bidQty := parseFloat(ticker.BidQty)
+	askQty := parseFloat(ticker.AskQty)
+
+	// 计算中间价
+	midPrice := (bidPrice + askPrice) / 2
+
+	// 确定交易所时间戳（期货优先用TxnTime撮合时间，否则用EventTime事件时间）
+	var exchangeTimestamp time.Time
+	if ticker.TxnTime > 0 {
+		exchangeTimestamp = time.UnixMilli(ticker.TxnTime)
+	} else if ticker.EventTime > 0 {
+		exchangeTimestamp = time.UnixMilli(ticker.EventTime)
+	} else {
+		exchangeTimestamp = time.Now() // fallback
+	}
+
+	return &common.Price{
+		Symbol:      ticker.Symbol,
+		Exchange:    exchange,
+		MarketType:  marketType,
+		Price:       midPrice,
+		BidPrice:    bidPrice,  // 真实bid价格
+		AskPrice:    askPrice,  // 真实ask价格
+		BidQty:      bidQty,
+		AskQty:      askQty,
+		Volume24h:   0, // BookTicker不包含成交量，需要从其他地方获取
+		Timestamp:   exchangeTimestamp, // 使用交易所时间
+		LastUpdated: time.Now(),        // 本地接收时间
+		Source:      common.PriceSourceWebSocket,
+	}
+}
+
+// ConvertWSMiniTickerToPrice 将 WebSocket MiniTicker 转换为通用 Price（不推荐，仅用于成交量）
+// 注意：MiniTicker只有last trade price，没有真实的bid/ask，会导致系统误差
 func ConvertWSMiniTickerToPrice(ticker *WSMiniTickerData, exchange common.Exchange, marketType common.MarketType) *common.Price {
 	price := parseFloat(ticker.LastPrice)
 	quoteVolume := parseFloat(ticker.QuoteVolume)
@@ -72,12 +122,13 @@ func ConvertWSMiniTickerToPrice(ticker *WSMiniTickerData, exchange common.Exchan
 		Exchange:    exchange,
 		MarketType:  marketType,
 		Price:       price,
-		BidPrice:    price, // MiniTicker不提供买卖价，使用LastPrice作为近似值
-		AskPrice:    price, // MiniTicker不提供买卖价，使用LastPrice作为近似值
+		BidPrice:    0, // MiniTicker没有真实bid/ask，不要伪造
+		AskPrice:    0,
 		BidQty:      0,
 		AskQty:      0,
 		Volume24h:   quoteVolume,
-		Timestamp:   time.UnixMilli(ticker.EventTime),
-		LastUpdated: time.Now(),
+		Timestamp:   time.UnixMilli(ticker.EventTime), // 使用交易所时间
+		LastUpdated: time.Now(),                       // 本地接收时间
+		Source:      common.PriceSourceWebSocket,
 	}
 }

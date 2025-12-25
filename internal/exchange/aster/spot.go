@@ -201,7 +201,7 @@ func (c *SpotClient) GetAll24hrTickers() ([]Ticker24hr, error) {
 	return tickers, nil
 }
 
-// ConvertToCommonPrice 转换为通用价格格式
+// ConvertToCommonPrice 转换为通用价格格式（REST API）
 func (c *SpotClient) ConvertToCommonPrice(ticker *BookTicker, volume24h float64) *common.Price {
 	bidPrice := parseFloat(ticker.BidPrice)
 	askPrice := parseFloat(ticker.AskPrice)
@@ -216,8 +216,9 @@ func (c *SpotClient) ConvertToCommonPrice(ticker *BookTicker, volume24h float64)
 		BidQty:      parseFloat(ticker.BidQty),
 		AskQty:      parseFloat(ticker.AskQty),
 		Volume24h:   volume24h,
-		Timestamp:   time.UnixMilli(ticker.Time),
-		LastUpdated: time.Now(),
+		Timestamp:   time.UnixMilli(ticker.Time), // 使用交易所时间
+		LastUpdated: time.Now(),                  // 本地接收时间
+		Source:      common.PriceSourceREST,      // 标记为REST数据源
 	}
 }
 

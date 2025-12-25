@@ -46,17 +46,17 @@ func main() {
 	asterSpotClient := aster.NewSpotClient(cfg.AsterSpotBaseURL, cfg.AsterAPIKey, cfg.AsterSecretKey)
 	asterFuturesClient := aster.NewFuturesClient(cfg.AsterFutureBaseURL, cfg.AsterAPIKey, cfg.AsterSecretKey)
 
-	// 启动Lighter WebSocket和REST
+	// 启动Lighter WebSocket连接池和REST
 	lighterMarkets := lighter.GetCommonMarkets()
 	lighterAPIBaseURL := lighter.LighterAPIBaseURL
 	marketIDs := lighter.GetMarketIDs(lighterMarkets)
-	lighterWS := startLighterWebSocket(store, lighterMarkets, lighterAPIBaseURL)
-	if lighterWS != nil {
-		defer lighterWS.Close()
+	lighterWSPool := startLighterWSPool(store, lighterMarkets, lighterAPIBaseURL, marketIDs)
+	if lighterWSPool != nil {
+		defer lighterWSPool.Close()
 	}
 
 	// Binance（可选，需要代理）
-	var binanceSpotWS *binance.WSClient
+	var binanceSpotWSPool *binance.SpotWSPool
 	var binanceFuturesWS *binance.WSClient
 
 	log.Println("[Binance] Enabled")
@@ -67,12 +67,13 @@ func main() {
 		binance.SetProxyURL(cfg.HTTPProxy)
 	}
 
-	// 启动Binance WebSocket
-	binanceSpotWS = startBinanceSpotWebSocket(store)
-	if binanceSpotWS != nil {
-		defer binanceSpotWS.Close()
+	// 启动Binance现货 WebSocket 连接池（分片模式）
+	binanceSpotWSPool = startBinanceSpotWSPool(store)
+	if binanceSpotWSPool != nil {
+		defer binanceSpotWSPool.Close()
 	}
 
+	// 启动Binance合约 WebSocket
 	binanceFuturesWS = startBinanceFuturesWebSocket(store)
 	if binanceFuturesWS != nil {
 		defer binanceFuturesWS.Close()
@@ -157,11 +158,10 @@ func startAsterWebSocket(store *pricestore.PriceStore) *aster.WSClient {
 
 	asterWS := aster.NewWSClient("wss://fstream.asterdex.com/ws", common.MarketTypeFuture)
 
-	asterWS.SetMiniTickerHandler(func(tickers []*aster.WSMiniTickerData) {
-		for _, ticker := range tickers {
-			price := aster.ConvertWSMiniTickerToPrice(ticker, common.ExchangeAster, common.MarketTypeFuture)
-			store.UpdatePrice(price)
-		}
+	// 使用BookTicker获取真实的bid/ask价格（推荐）
+	asterWS.SetBookTickerHandler(func(ticker *aster.WSBookTickerData) {
+		price := aster.ConvertWSBookTickerToPrice(ticker, common.ExchangeAster, common.MarketTypeFuture)
+		store.UpdatePrice(price)
 	})
 
 	if err := asterWS.Connect(); err != nil {
@@ -169,72 +169,102 @@ func startAsterWebSocket(store *pricestore.PriceStore) *aster.WSClient {
 		return nil
 	}
 
-	if err := asterWS.Subscribe([]string{"!miniTicker@arr"}); err != nil {
+	// 订阅全市场最优挂单信息（实时bid/ask）
+	if err := asterWS.Subscribe([]string{"!bookTicker"}); err != nil {
 		log.Printf("[Aster] Failed to subscribe: %v", err)
 		return nil
 	}
 
-	log.Println("[Aster] WebSocket connected and subscribed")
+	log.Println("[Aster] WebSocket connected and subscribed to bookTicker")
 	return asterWS
 }
 
-// startLighterWebSocket 启动Lighter WebSocket连接
-func startLighterWebSocket(store *pricestore.PriceStore, markets []*lighter.Market, apiBaseURL string) *lighter.WSClient {
-	log.Println("[Lighter] Connecting to WebSocket...")
+// startLighterWSPool 启动Lighter WebSocket连接池（分片模式）
+func startLighterWSPool(store *pricestore.PriceStore, markets []*lighter.Market, apiBaseURL string, marketIDs []int) *lighter.WSPool {
+	log.Println("[Lighter] Initializing WebSocket pool...")
 
-	lighterWS := lighter.NewWSClient("wss://api.lighter.xyz/v1/ws", markets, apiBaseURL, 60)
+	// 步骤1：冷启动 - 使用 REST API 获取所有市场的快照数据
+	log.Println("[Lighter] Fetching initial snapshot via REST API...")
+	prices, err := lighter.FetchMarketData(apiBaseURL, marketIDs)
+	if err != nil {
+		log.Printf("[Lighter] Failed to fetch initial snapshot: %v", err)
+		// 继续启动 WebSocket，即使 REST 失败
+	} else {
+		// 更新到 store（冷启动数据）
+		for _, price := range prices {
+			store.UpdatePrice(price)
+		}
+		log.Printf("[Lighter] Loaded %d markets from REST snapshot", len(prices))
+	}
 
-	lighterWS.SetMessageHandler(func(price *common.Price) {
+	// 步骤2：创建 WebSocket 连接池（每个连接 60 个市场）
+	pool := lighter.NewWSPool(markets, 60)
+
+	// 设置价格处理器
+	pool.SetPriceHandler(func(price *common.Price) {
 		store.UpdatePrice(price)
 	})
 
-	if err := lighterWS.Connect(); err != nil {
-		log.Printf("[Lighter] Failed to connect WebSocket: %v", err)
+	// 步骤3：启动连接池
+	if err := pool.Start(); err != nil {
+		log.Printf("[Lighter] Failed to start WebSocket pool: %v", err)
 		return nil
 	}
 
-	if err := lighterWS.SubscribeAll(); err != nil {
-		log.Printf("[Lighter] Failed to subscribe: %v", err)
-		return nil
-	}
-
-	log.Println("[Lighter] WebSocket connected and subscribed")
-	return lighterWS
+	log.Println("[Lighter] WebSocket pool started successfully")
+	return pool
 }
 
-// startBinanceSpotWebSocket 启动Binance现货WebSocket
-func startBinanceSpotWebSocket(store *pricestore.PriceStore) *binance.WSClient {
-	log.Println("[Binance Spot] Connecting to WebSocket...")
+// startBinanceSpotWSPool 启动Binance现货WebSocket连接池（分片模式）
+func startBinanceSpotWSPool(store *pricestore.PriceStore) *binance.SpotWSPool {
+	log.Println("[Binance Spot] Initializing WebSocket pool...")
 
-	binanceSpotWS := binance.NewWSClient("wss://stream.binance.com:443/ws/!miniTicker@arr", common.MarketTypeSpot)
+	// 步骤1：冷启动 - 使用 REST API 获取所有交易对的快照数据
+	log.Println("[Binance Spot] Fetching initial snapshot via REST API...")
+	prices, err := binance.FetchSpotPrices()
+	if err != nil {
+		log.Printf("[Binance Spot] Failed to fetch initial snapshot: %v", err)
+		return nil
+	}
 
-	binanceSpotWS.SetMiniTickerHandler(func(tickers []*binance.WSMiniTickerData) {
-		for _, ticker := range tickers {
-			price := binance.ConvertWSMiniTickerToPrice(ticker, common.ExchangeBinance, common.MarketTypeSpot)
-			store.UpdatePrice(price)
-		}
+	// 更新到 store（冷启动数据）
+	symbols := make([]string, 0, len(prices))
+	for _, price := range prices {
+		store.UpdatePrice(price)
+		symbols = append(symbols, price.Symbol)
+	}
+	log.Printf("[Binance Spot] Loaded %d symbols from REST snapshot", len(symbols))
+
+	// 步骤2：创建 WebSocket 连接池（每个连接 50 个 symbol）
+	pool := binance.NewSpotWSPool(symbols, 50)
+
+	// 设置 BookTicker 处理器
+	pool.SetBookTickerHandler(func(ticker *binance.WSBookTickerData) {
+		price := binance.ConvertWSBookTickerToPrice(ticker, common.ExchangeBinance, common.MarketTypeSpot)
+		store.UpdatePrice(price)
 	})
 
-	if err := binanceSpotWS.Connect(); err != nil {
-		log.Printf("[Binance Spot] Failed to connect WebSocket: %v", err)
+	// 步骤3：启动连接池
+	if err := pool.Start(); err != nil {
+		log.Printf("[Binance Spot] Failed to start WebSocket pool: %v", err)
 		return nil
 	}
 
-	log.Println("[Binance Spot] WebSocket connected")
-	return binanceSpotWS
+	log.Println("[Binance Spot] WebSocket pool started successfully")
+	return pool
 }
 
-// startBinanceFuturesWebSocket 启动Binance合约WebSocket
+// startBinanceFuturesWebSocket 启动Binance合约WebSocket（使用BookTicker获取真实bid/ask）
 func startBinanceFuturesWebSocket(store *pricestore.PriceStore) *binance.WSClient {
 	log.Println("[Binance Futures] Connecting to WebSocket...")
 
-	binanceFuturesWS := binance.NewWSClient("wss://fstream.binance.com/ws/!miniTicker@arr", common.MarketTypeFuture)
+	// 使用bookTicker获取真实的bid/ask价格
+	binanceFuturesWS := binance.NewWSClient("wss://fstream.binance.com/ws/!bookTicker", common.MarketTypeFuture)
 
-	binanceFuturesWS.SetMiniTickerHandler(func(tickers []*binance.WSMiniTickerData) {
-		for _, ticker := range tickers {
-			price := binance.ConvertWSMiniTickerToPrice(ticker, common.ExchangeBinance, common.MarketTypeFuture)
-			store.UpdatePrice(price)
-		}
+	// 设置BookTicker处理器（真实bid/ask）
+	binanceFuturesWS.SetBookTickerHandler(func(ticker *binance.WSBookTickerData) {
+		price := binance.ConvertWSBookTickerToPrice(ticker, common.ExchangeBinance, common.MarketTypeFuture)
+		store.UpdatePrice(price)
 	})
 
 	if err := binanceFuturesWS.Connect(); err != nil {
@@ -242,7 +272,7 @@ func startBinanceFuturesWebSocket(store *pricestore.PriceStore) *binance.WSClien
 		return nil
 	}
 
-	log.Println("[Binance Futures] WebSocket connected")
+	log.Println("[Binance Futures] WebSocket connected (BookTicker)")
 	return binanceFuturesWS
 }
 

@@ -20,6 +20,7 @@ type WSClient struct {
 	MarketType         common.MarketType
 	mu                 sync.RWMutex
 	subscriptions      map[string]bool
+	bookTickerHandler  func(*WSBookTickerData)
 	miniTickerHandler  func([]*WSMiniTickerData)
 	reconnect          bool
 	done               chan struct{}
@@ -39,7 +40,12 @@ func NewWSClient(url string, marketType common.MarketType) *WSClient {
 	}
 }
 
-// SetMiniTickerHandler 设置 MiniTicker 处理器
+// SetBookTickerHandler 设置 BookTicker 处理器（推荐使用）
+func (w *WSClient) SetBookTickerHandler(handler func(*WSBookTickerData)) {
+	w.bookTickerHandler = handler
+}
+
+// SetMiniTickerHandler 设置 MiniTicker 处理器（仅用于成交量数据）
 func (w *WSClient) SetMiniTickerHandler(handler func([]*WSMiniTickerData)) {
 	w.miniTickerHandler = handler
 }
@@ -110,8 +116,15 @@ func (w *WSClient) Subscribe(streams []string) error {
 	return nil
 }
 
-// SubscribeAll 订阅全市场 MiniTicker
+// SubscribeAll 订阅全市场 BookTicker（实时最优买卖价）
 func (w *WSClient) SubscribeAll() error {
+	// Binance 使用 !bookTicker 订阅全市场的实时最优买卖价
+	// 注意：这是逐个推送，不是数组格式
+	return w.Subscribe([]string{"!bookTicker"})
+}
+
+// SubscribeAllMiniTicker 订阅全市场 MiniTicker（仅用于24h成交量）
+func (w *WSClient) SubscribeAllMiniTicker() error {
 	// Binance 使用 !miniTicker@arr 订阅全市场
 	return w.Subscribe([]string{"!miniTicker@arr"})
 }
@@ -199,23 +212,44 @@ func (w *WSClient) readMessages() {
 
 // processMessage 处理接收到的消息
 func (w *WSClient) processMessage(message []byte) {
-	// 1️⃣ 先尝试解析 Combined Stream 格式 {"stream":"...", "data":...}
+	// 1️⃣ 先尝试解析 BookTicker（优先处理，因为这是我们想要的）
+	var bookTicker WSBookTickerData
+	if err := json.Unmarshal(message, &bookTicker); err == nil && bookTicker.Symbol != "" && bookTicker.BidPrice != "" {
+		// 打印BTC/ETH/SOL的bookTicker数据用于调试
+		if bookTicker.Symbol == "BTCUSDT" || bookTicker.Symbol == "ETHUSDT" || bookTicker.Symbol == "SOLUSDT" {
+			log.Printf("[Binance WS %s] BookTicker %s: bid=%s, ask=%s, txnTime=%d, eventTime=%d",
+				w.MarketType, bookTicker.Symbol, bookTicker.BidPrice, bookTicker.AskPrice, bookTicker.TxnTime, bookTicker.EventTime)
+		}
+
+		w.mu.RLock()
+		handler := w.bookTickerHandler
+		w.mu.RUnlock()
+
+		if handler != nil {
+			handler(&bookTicker)
+		}
+		return
+	}
+
+	// 2️⃣ 尝试解析 Combined Stream 格式 {"stream":"...", "data":...}
 	var wsMsg WSMessage
 	if err := json.Unmarshal(message, &wsMsg); err == nil && len(wsMsg.Data) > 0 {
-		// Combined Stream 格式
+		// 尝试解析 Combined Stream 中的 BookTicker
+		var bookTickerCombined WSBookTickerData
+		if err := json.Unmarshal(wsMsg.Data, &bookTickerCombined); err == nil && bookTickerCombined.Symbol != "" && bookTickerCombined.BidPrice != "" {
+			w.mu.RLock()
+			handler := w.bookTickerHandler
+			w.mu.RUnlock()
+
+			if handler != nil {
+				handler(&bookTickerCombined)
+			}
+			return
+		}
+
+		// Combined Stream 格式 - MiniTicker数组
 		var miniTickers []*WSMiniTickerData
 		if err := json.Unmarshal(wsMsg.Data, &miniTickers); err == nil && len(miniTickers) > 0 {
-			// 打印接收到的数据数量
-			log.Printf("[Binance WS] COMBINED - Received %d miniTickers from stream: %s", len(miniTickers), wsMsg.Stream)
-
-			// 打印 BTC/ETH/SOL 相关的数据用于调试
-			for _, ticker := range miniTickers {
-				if ticker.Symbol == "BTCUSDT" || ticker.Symbol == "ETHUSDT" || ticker.Symbol == "SOLUSDT" {
-					log.Printf("[Binance WS] RAW %s: LastPrice=%s, Volume=%s, QuoteVolume=%s, EventTime=%d",
-						ticker.Symbol, ticker.LastPrice, ticker.Volume, ticker.QuoteVolume, ticker.EventTime)
-				}
-			}
-
 			w.mu.RLock()
 			handler := w.miniTickerHandler
 			w.mu.RUnlock()
@@ -240,20 +274,9 @@ func (w *WSClient) processMessage(message []byte) {
 		}
 	}
 
-	// 2️⃣ 如果不是 Combined Stream 格式，尝试直接解析为 MiniTicker 数组
+	// 3️⃣ 如果不是 Combined Stream 格式，尝试直接解析为 MiniTicker 数组
 	var miniTickers []*WSMiniTickerData
 	if err := json.Unmarshal(message, &miniTickers); err == nil && len(miniTickers) > 0 {
-		// 打印接收到的数据数量
-		log.Printf("[Binance WS] DIRECT - Received %d miniTickers", len(miniTickers))
-
-		// 打印 BTC/ETH/SOL 相关的数据用于调试
-		for _, ticker := range miniTickers {
-			if ticker.Symbol == "BTCUSDT" || ticker.Symbol == "ETHUSDT" || ticker.Symbol == "SOLUSDT" {
-				log.Printf("[Binance WS] RAW %s: LastPrice=%s, Volume=%s, QuoteVolume=%s, EventTime=%d",
-					ticker.Symbol, ticker.LastPrice, ticker.Volume, ticker.QuoteVolume, ticker.EventTime)
-			}
-		}
-
 		w.mu.RLock()
 		handler := w.miniTickerHandler
 		w.mu.RUnlock()
@@ -264,7 +287,7 @@ func (w *WSClient) processMessage(message []byte) {
 		return
 	}
 
-	// 3️⃣ 尝试解析单个 MiniTicker（直接格式）
+	// 4️⃣ 尝试解析单个 MiniTicker（直接格式）
 	var singleTicker WSMiniTickerData
 	if err := json.Unmarshal(message, &singleTicker); err == nil && singleTicker.EventType == "24hrMiniTicker" {
 		w.mu.RLock()
@@ -276,6 +299,21 @@ func (w *WSClient) processMessage(message []byte) {
 		}
 		return
 	}
+
+	// 5️⃣ 如果所有格式都无法解析，打印警告（每100条打印一次）
+	w.mu.Lock()
+	if w.subscriptionID%100 == 0 {
+		log.Printf("[Binance WS %s] Warning: Unable to parse message format: %s", w.MarketType, string(message[:min(200, len(message))]))
+	}
+	w.subscriptionID++
+	w.mu.Unlock()
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // keepAlive 保持连接活跃（Binance 服务器会主动发送 PING，这里只是监控）

@@ -19,6 +19,7 @@ type WSClient struct {
 	mu                sync.RWMutex
 	subscriptions     map[string]bool
 	messageHandler    func(*WSMessage)
+	bookTickerHandler func(*WSBookTickerData)
 	miniTickerHandler func([]*WSMiniTickerData)
 	reconnect         bool
 	done              chan struct{}
@@ -32,15 +33,17 @@ type WSMessage struct {
 	Data   json.RawMessage `json:"data"`
 }
 
-// WSBookTickerData 最优挂单数据
+// WSBookTickerData 最优挂单数据（实时bookTicker）
 type WSBookTickerData struct {
-	UpdateID int64  `json:"u"`
-	Symbol   string `json:"s"`
-	BidPrice string `json:"b"`
-	BidQty   string `json:"B"`
-	AskPrice string `json:"a"`
-	AskQty   string `json:"A"`
-	Time     int64  `json:"T"`
+	EventType string `json:"e"` // 事件类型 "bookTicker"
+	UpdateID  int64  `json:"u"` // 更新ID
+	EventTime int64  `json:"E"` // 事件推送时间（毫秒）
+	TxnTime   int64  `json:"T"` // 撮合时间（毫秒）
+	Symbol    string `json:"s"` // 交易对
+	BidPrice  string `json:"b"` // 买单最优挂单价格
+	BidQty    string `json:"B"` // 买单最优挂单数量
+	AskPrice  string `json:"a"` // 卖单最优挂单价格
+	AskQty    string `json:"A"` // 卖单最优挂单数量
 }
 
 // WSTickerData Ticker数据
@@ -179,7 +182,14 @@ func (w *WSClient) SetMessageHandler(handler func(*WSMessage)) {
 	w.messageHandler = handler
 }
 
-// SetMiniTickerHandler 设置MiniTicker处理器
+// SetBookTickerHandler 设置BookTicker处理器（推荐使用）
+func (w *WSClient) SetBookTickerHandler(handler func(*WSBookTickerData)) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.bookTickerHandler = handler
+}
+
+// SetMiniTickerHandler 设置MiniTicker处理器（仅用于成交量数据）
 func (w *WSClient) SetMiniTickerHandler(handler func([]*WSMiniTickerData)) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -253,20 +263,28 @@ func (w *WSClient) readMessages() {
 				continue
 			}
 
-			// 如果不是 combined stream 格式，尝试直接解析为 MiniTicker 数组（兼容旧格式）
-			var miniTickers []*WSMiniTickerData
-			if err := json.Unmarshal(message, &miniTickers); err == nil && len(miniTickers) > 0 {
-				// 打印接收到的数据数量
-				log.Printf("[Aster WS] DIRECT FORMAT - Received %d miniTickers", len(miniTickers))
-
+			// 1️⃣ 优先尝试解析 BookTicker（真实bid/ask）
+			var bookTicker WSBookTickerData
+			if err := json.Unmarshal(message, &bookTicker); err == nil && bookTicker.Symbol != "" && bookTicker.BidPrice != "" {
 				// 打印 BTC/ETH/SOL 相关的数据用于调试
-				for _, ticker := range miniTickers {
-					if ticker.Symbol == "BTCUSDT" || ticker.Symbol == "ETHUSDT" || ticker.Symbol == "SOLUSDT" {
-						log.Printf("[Aster WS] RAW %s: LastPrice=%s, Volume=%s, QuoteVolume=%s, EventTime=%d",
-							ticker.Symbol, ticker.LastPrice, ticker.Volume, ticker.QuoteVolume, ticker.EventTime)
-					}
+				if bookTicker.Symbol == "BTCUSDT" || bookTicker.Symbol == "ETHUSDT" || bookTicker.Symbol == "SOLUSDT" {
+					log.Printf("[Aster WS %s] BookTicker %s: bid=%s, ask=%s, txnTime=%d, eventTime=%d",
+						w.MarketType, bookTicker.Symbol, bookTicker.BidPrice, bookTicker.AskPrice, bookTicker.TxnTime, bookTicker.EventTime)
 				}
 
+				w.mu.RLock()
+				handler := w.bookTickerHandler
+				w.mu.RUnlock()
+
+				if handler != nil {
+					handler(&bookTicker)
+				}
+				continue
+			}
+
+			// 2️⃣ 如果不是 bookTicker，尝试解析为 MiniTicker 数组（向后兼容）
+			var miniTickers []*WSMiniTickerData
+			if err := json.Unmarshal(message, &miniTickers); err == nil && len(miniTickers) > 0 {
 				w.mu.RLock()
 				handler := w.miniTickerHandler
 				w.mu.RUnlock()
@@ -351,7 +369,44 @@ func (w *WSClient) Close() {
 	w.mu.Unlock()
 }
 
-// ConvertWSMiniTickerToPrice 将WebSocket MiniTicker转换为通用价格
+// ConvertWSBookTickerToPrice 将WebSocket BookTicker转换为通用价格（推荐）
+func ConvertWSBookTickerToPrice(ticker *WSBookTickerData, exchange common.Exchange, marketType common.MarketType) *common.Price {
+	bidPrice := parseFloat(ticker.BidPrice)
+	askPrice := parseFloat(ticker.AskPrice)
+	bidQty := parseFloat(ticker.BidQty)
+	askQty := parseFloat(ticker.AskQty)
+
+	// 计算中间价
+	midPrice := (bidPrice + askPrice) / 2
+
+	// 使用交易所时间（优先用TxnTime撮合时间，否则用EventTime事件时间）
+	var exchangeTimestamp time.Time
+	if ticker.TxnTime > 0 {
+		exchangeTimestamp = time.UnixMilli(ticker.TxnTime)
+	} else if ticker.EventTime > 0 {
+		exchangeTimestamp = time.UnixMilli(ticker.EventTime)
+	} else {
+		exchangeTimestamp = time.Now() // fallback
+	}
+
+	return &common.Price{
+		Symbol:      ticker.Symbol,
+		Exchange:    exchange,
+		MarketType:  marketType,
+		Price:       midPrice,
+		BidPrice:    bidPrice, // 真实bid价格
+		AskPrice:    askPrice, // 真实ask价格
+		BidQty:      bidQty,
+		AskQty:      askQty,
+		Volume24h:   0, // BookTicker不包含成交量
+		Timestamp:   exchangeTimestamp, // 使用交易所时间
+		LastUpdated: time.Now(),        // 本地接收时间
+		Source:      common.PriceSourceWebSocket,
+	}
+}
+
+// ConvertWSMiniTickerToPrice 将WebSocket MiniTicker转换为通用价格（不推荐）
+// 注意：MiniTicker只有last trade price，没有真实的bid/ask，会导致系统误差
 func ConvertWSMiniTickerToPrice(ticker *WSMiniTickerData, exchange common.Exchange, marketType common.MarketType) *common.Price {
 	price := parseFloat(ticker.LastPrice)
 	quoteVolume := parseFloat(ticker.QuoteVolume)
@@ -361,12 +416,13 @@ func ConvertWSMiniTickerToPrice(ticker *WSMiniTickerData, exchange common.Exchan
 		Exchange:    exchange,
 		MarketType:  marketType,
 		Price:       price,
-		BidPrice:    price, // MiniTicker不提供买卖价，使用LastPrice作为近似值
-		AskPrice:    price, // MiniTicker不提供买卖价，使用LastPrice作为近似值
+		BidPrice:    0, // MiniTicker没有真实bid/ask，不要伪造
+		AskPrice:    0,
 		BidQty:      0,
 		AskQty:      0,
 		Volume24h:   quoteVolume,
-		Timestamp:   time.UnixMilli(ticker.EventTime),
-		LastUpdated: time.Now(),
+		Timestamp:   time.UnixMilli(ticker.EventTime), // 使用交易所时间
+		LastUpdated: time.Now(),                       // 本地接收时间
+		Source:      common.PriceSourceWebSocket,
 	}
 }

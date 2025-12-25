@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto-arbitrage-monitor/pkg/common"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -14,6 +15,15 @@ import (
 
 	binance_connector "github.com/binance/binance-connector-go"
 )
+
+// RestBookTickerResponse Binance BookTicker REST API 响应
+type RestBookTickerResponse struct {
+	Symbol   string `json:"symbol"`
+	BidPrice string `json:"bidPrice"`
+	BidQty   string `json:"bidQty"`
+	AskPrice string `json:"askPrice"`
+	AskQty   string `json:"askQty"`
+}
 
 // API Base URLs（按优先级排序）
 var (
@@ -236,38 +246,52 @@ func (c *RestClient) rotateFuturesURL() {
 	log.Printf("[Binance API] Switched to futures URL: %s", FuturesAPIBaseURLs[c.currentFutIdx])
 }
 
-// fetchSpotPrices 获取现货价格（单次请求）- 使用 TickerPrice API（轻量级）
+// fetchSpotPrices 获取现货价格（单次请求）- 使用 BookTicker API（真实bid/ask）
 func (c *RestClient) fetchSpotPrices() ([]*common.Price, error) {
 	c.mu.Lock()
-	client := c.spotClients[c.currentSpotIdx]
 	currentURL := SpotAPIBaseURLs[c.currentSpotIdx]
 	c.mu.Unlock()
 
-	log.Printf("[Binance API] Fetching SPOT prices from %s", currentURL)
+	log.Printf("[Binance API] Fetching SPOT BookTicker from %s", currentURL)
 	startTime := time.Now()
 
-	// 使用 SDK 获取 TickerPrice（轻量级，只有 symbol 和 price）
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
+	// 直接使用 HTTP 请求获取 BookTicker
+	endpoint := currentURL + "/api/v3/ticker/bookTicker"
 
-	tickers, err := client.NewTickerPriceService().Do(ctx)
+	req, err := http.NewRequest("GET", endpoint, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch spot tickers: %w", err)
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	httpClient := &http.Client{Timeout: 20 * time.Second}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch spot bookTickers: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	var bookTickers []RestBookTickerResponse
+	if err := json.NewDecoder(resp.Body).Decode(&bookTickers); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
 	duration := time.Since(startTime)
-	log.Printf("[Binance API] Fetched %d SPOT tickers in %.2fs", len(tickers), duration.Seconds())
+	log.Printf("[Binance API] Fetched %d SPOT bookTickers in %.2fs", len(bookTickers), duration.Seconds())
 
 	// 转换为通用 Price 格式
-	prices := make([]*common.Price, 0, len(tickers))
-	for _, ticker := range tickers {
-		price := convertTickerPriceToPrice(*ticker, common.MarketTypeSpot)
+	prices := make([]*common.Price, 0, len(bookTickers))
+	for _, ticker := range bookTickers {
+		price := convertRestBookTickerToPrice(ticker, common.MarketTypeSpot)
 		if price != nil {
 			prices = append(prices, price)
 		}
 	}
 
-	log.Printf("[Binance API] ✓ Successfully processed %d SPOT prices", len(prices))
+	log.Printf("[Binance API] ✓ Successfully processed %d SPOT prices with real bid/ask", len(prices))
 	return prices, nil
 }
 
@@ -306,7 +330,43 @@ func (c *RestClient) fetchFuturesPrices() ([]*common.Price, error) {
 	return prices, nil
 }
 
+// convertRestBookTickerToPrice 将 REST BookTicker 响应转换为通用 Price（推荐）
+// BookTicker 包含真实的 bid/ask 价格
+func convertRestBookTickerToPrice(ticker RestBookTickerResponse, marketType common.MarketType) *common.Price {
+	// 转换价格（REST API 返回的都是字符串）
+	bidPrice := parseFloat(ticker.BidPrice)
+	askPrice := parseFloat(ticker.AskPrice)
+	bidQty := parseFloat(ticker.BidQty)
+	askQty := parseFloat(ticker.AskQty)
+
+	// 如果价格为 0，跳过
+	if bidPrice == 0 || askPrice == 0 {
+		return nil
+	}
+
+	// 计算中间价
+	midPrice := (bidPrice + askPrice) / 2
+
+	now := time.Now()
+
+	return &common.Price{
+		Symbol:      ticker.Symbol,
+		Exchange:    common.ExchangeBinance,
+		MarketType:  marketType,
+		Price:       midPrice,
+		BidPrice:    bidPrice, // 真实 bid 价格
+		AskPrice:    askPrice, // 真实 ask 价格
+		BidQty:      bidQty,
+		AskQty:      askQty,
+		Volume24h:   0,                      // BookTicker 没有成交量信息
+		Timestamp:   now,                    // REST API 没有交易所时间戳，使用本地时间
+		LastUpdated: now,                    // 本地接收时间
+		Source:      common.PriceSourceREST, // 标记为REST数据源
+	}
+}
+
 // convertTickerPriceToPrice 将 SDK 返回的 TickerPrice 转换为通用 Price
+// 注意：这个API只返回价格，没有bid/ask，数据质量较差，应该由WebSocket更新覆盖
 func convertTickerPriceToPrice(ticker binance_connector.TickerPriceResponse, marketType common.MarketType) *common.Price {
 	// 转换价格（SDK 返回的都是字符串）
 	price := parseFloat(ticker.Price)
@@ -316,17 +376,20 @@ func convertTickerPriceToPrice(ticker binance_connector.TickerPriceResponse, mar
 		return nil
 	}
 
+	now := time.Now()
+
 	return &common.Price{
 		Symbol:      ticker.Symbol,
 		Exchange:    common.ExchangeBinance,
 		MarketType:  marketType,
 		Price:       price,
-		BidPrice:    price, // TickerPrice 没有 bid/ask，使用 price
-		AskPrice:    price,
-		BidQty:      0, // TickerPrice 没有数量信息
+		BidPrice:    0, // REST API TickerPrice 没有真实bid/ask，不要伪造
+		AskPrice:    0,
+		BidQty:      0,
 		AskQty:      0,
-		Volume24h:   0, // TickerPrice 没有成交量信息
-		Timestamp:   time.Now(),
-		LastUpdated: time.Now(),
+		Volume24h:   0,      // TickerPrice 没有成交量信息
+		Timestamp:   now,    // REST API 没有交易所时间戳，使用本地时间
+		LastUpdated: now,    // 本地接收时间
+		Source:      common.PriceSourceREST, // 标记为REST数据源
 	}
 }

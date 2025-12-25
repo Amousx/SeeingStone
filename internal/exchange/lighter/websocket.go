@@ -203,6 +203,14 @@ func (c *WSClient) processMessage(message []byte) {
 			return
 		}
 		c.handleMarketStatsUpdate(&update)
+
+	case "subscribed/order_book":
+		// 订阅确认消息
+		log.Printf("[Lighter] ✓ Subscription confirmed: %s", baseMsg.Channel)
+
+	case "subscribed/market_stats":
+		// 订阅确认消息
+		log.Printf("[Lighter] ✓ Subscription confirmed: %s", baseMsg.Channel)
 	}
 }
 
@@ -284,43 +292,62 @@ func (c *WSClient) sendCombinedPrice(marketID int) {
 
 	// 如果没有mark price但有完整order book，使用order book中间价
 	if markPrice == 0 && hasBothSides {
-		bidPriceOB := parseFloat(orderBook.Bids[0].Price)
-		askPriceOB := parseFloat(orderBook.Asks[0].Price)
-		markPrice = (bidPriceOB + askPriceOB) / 2
+		bidPriceOB, _, hasBid := c.getBestBid(orderBook.Bids)
+		askPriceOB, _, hasAsk := c.getBestAsk(orderBook.Asks)
+		if hasBid && hasAsk {
+			markPrice = (bidPriceOB + askPriceOB) / 2
+		}
 	}
 
-	// 如果有完整的order book，使用实际的bid/ask
+	// 如果有完整的order book，使用实际的bid/ask（过滤低流动性订单）
 	if hasBothSides {
-		bidPrice = parseFloat(orderBook.Bids[0].Price)
-		askPrice = parseFloat(orderBook.Asks[0].Price)
-		bidQty = parseFloat(orderBook.Bids[0].Size)
-		askQty = parseFloat(orderBook.Asks[0].Size)
-		if markPrice == 0 {
-			markPrice = (bidPrice + askPrice) / 2
-		}
-	} else if hasPartialOrderBook {
-		// 只有部分order book数据
-		if len(orderBook.Bids) > 0 {
-			bidPrice = parseFloat(orderBook.Bids[0].Price)
-			bidQty = parseFloat(orderBook.Bids[0].Size)
-			// 使用bid价格估算ask价格（假设0.02%的价差）
-			askPrice = bidPrice * 1.0002
-			askQty = 0
+		var hasBid, hasAsk bool
+		bidPrice, bidQty, hasBid = c.getBestBid(orderBook.Bids)
+		askPrice, askQty, hasAsk = c.getBestAsk(orderBook.Asks)
+
+		if hasBid && hasAsk {
 			if markPrice == 0 {
-				markPrice = bidPrice * 1.0001 // 中间价
+				markPrice = (bidPrice + askPrice) / 2
 			}
 		} else {
-			// 只有asks
-			askPrice = parseFloat(orderBook.Asks[0].Price)
-			askQty = parseFloat(orderBook.Asks[0].Size)
-			// 使用ask价格估算bid价格
-			bidPrice = askPrice * 0.9998
-			bidQty = 0
-			if markPrice == 0 {
-				markPrice = askPrice * 0.9999 // 中间价
+			// 没有足够流动性的订单，降级为部分订单簿处理
+			hasBothSides = false
+			hasPartialOrderBook = hasBid || hasAsk
+		}
+	}
+
+	if !hasBothSides && hasPartialOrderBook {
+		// 只有部分order book数据
+		if len(orderBook.Bids) > 0 {
+			var hasBid bool
+			bidPrice, bidQty, hasBid = c.getBestBid(orderBook.Bids)
+			if hasBid {
+				// 使用bid价格估算ask价格（假设0.02%的价差）
+				askPrice = bidPrice * 1.0002
+				askQty = 0
+				if markPrice == 0 {
+					markPrice = bidPrice * 1.0001 // 中间价
+				}
+			} else {
+				// 没有有效的 bid
+				return
+			}
+		} else if len(orderBook.Asks) > 0 {
+			var hasAsk bool
+			askPrice, askQty, hasAsk = c.getBestAsk(orderBook.Asks)
+			if hasAsk {
+				// 使用ask价格估算bid价格
+				bidPrice = askPrice * 0.9998
+				bidQty = 0
+				if markPrice == 0 {
+					markPrice = askPrice * 0.9999 // 中间价
+				}
+			} else {
+				// 没有有效的 ask
+				return
 			}
 		}
-	} else {
+	} else if !hasBothSides && !hasPartialOrderBook {
 		// 只有mark price，计算买卖价差（基于mark price的小幅偏移）
 		spread := markPrice * 0.0001 // 假设0.01%的价差
 		bidPrice = markPrice - spread
@@ -360,8 +387,9 @@ func (c *WSClient) sendCombinedPrice(marketID int) {
 		BidQty:      bidQty,
 		AskQty:      askQty,
 		Volume24h:   volume24h,
-		Timestamp:   timestamp,
-		LastUpdated: time.Now(),
+		Timestamp:   timestamp,              // 使用交易所时间
+		LastUpdated: time.Now(),             // 本地接收时间
+		Source:      common.PriceSourceWebSocket, // WebSocket数据源
 	}
 
 	c.messageHandler(price)
@@ -471,4 +499,76 @@ func (c *WSClient) updateMarkets() {
 	}
 
 	log.Printf("Market refresh completed. Now monitoring %d markets", len(c.markets))
+}
+
+// getBestBid 获取最优买单价格（过滤低流动性订单，选择价格最高的）
+// 返回：价格，数量，是否找到有效订单
+func (c *WSClient) getBestBid(bids []PriceLevel) (float64, float64, bool) {
+	const minNotional = 5.0 // 最小名义价值 5 USDT
+
+	var bestPrice float64
+	var bestQty float64
+	found := false
+
+	for _, bid := range bids {
+		price := parseFloat(bid.Price)
+		size := parseFloat(bid.Size)
+
+		if price == 0 || size == 0 {
+			continue
+		}
+
+		// 计算名义价值 = price * size
+		notional := price * size
+
+		// 过滤掉名义价值小于 5 USDT 的订单
+		if notional < minNotional {
+			continue
+		}
+
+		// 对于买单（bid），选择价格最高的
+		if !found || price > bestPrice {
+			bestPrice = price
+			bestQty = size
+			found = true
+		}
+	}
+
+	return bestPrice, bestQty, found
+}
+
+// getBestAsk 获取最优卖单价格（过滤低流动性订单，选择价格最低的）
+// 返回：价格，数量，是否找到有效订单
+func (c *WSClient) getBestAsk(asks []PriceLevel) (float64, float64, bool) {
+	const minNotional = 5.0 // 最小名义价值 5 USDT
+
+	var bestPrice float64
+	var bestQty float64
+	found := false
+
+	for _, ask := range asks {
+		price := parseFloat(ask.Price)
+		size := parseFloat(ask.Size)
+
+		if price == 0 || size == 0 {
+			continue
+		}
+
+		// 计算名义价值 = price * size
+		notional := price * size
+
+		// 过滤掉名义价值小于 5 USDT 的订单
+		if notional < minNotional {
+			continue
+		}
+
+		// 对于卖单（ask），选择价格最低的
+		if !found || price < bestPrice {
+			bestPrice = price
+			bestQty = size
+			found = true
+		}
+	}
+
+	return bestPrice, bestQty, found
 }

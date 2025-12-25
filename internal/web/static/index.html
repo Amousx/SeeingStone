@@ -324,6 +324,18 @@
                     <div class="stat-value" id="total-symbols">-</div>
                 </div>
                 <div class="stat-item">
+                    <div class="stat-label">Binance</div>
+                    <div class="stat-value" id="binance-count" style="color: #f6ad55;">-</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">Aster</div>
+                    <div class="stat-value" id="aster-count" style="color: #4299e1;">-</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">Lighter (盘前)</div>
+                    <div class="stat-value" id="lighter-count" style="color: #48bb78;">-</div>
+                </div>
+                <div class="stat-item">
                     <div class="stat-label">最后更新</div>
                     <div class="stat-value" id="last-update">-</div>
                 </div>
@@ -404,6 +416,12 @@
                 if (result.success) {
                     document.getElementById('active-prices').textContent = result.data.active_prices;
                     document.getElementById('total-symbols').textContent = result.data.total_symbols;
+
+                    // 显示各个交易所的数据量
+                    const byExchange = result.data.by_exchange || {};
+                    document.getElementById('binance-count').textContent = byExchange['BINANCE'] || 0;
+                    document.getElementById('aster-count').textContent = byExchange['ASTER'] || 0;
+                    document.getElementById('lighter-count').textContent = byExchange['LIGHTER'] || 0;
                 }
             } catch (error) {
                 console.error('Failed to load stats:', error);

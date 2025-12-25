@@ -389,6 +389,23 @@
             color: white;
             position: relative;
             overflow: hidden;
+            transition: all 0.3s ease;
+        }
+
+        /* 确认的套利机会（持续6秒以上）- 红色高亮 */
+        .arbitrage-card.confirmed {
+            background: linear-gradient(135deg, #f56565 0%, #c53030 100%);
+            box-shadow: 0 8px 16px rgba(245, 101, 101, 0.4);
+            animation: glow 2s ease-in-out infinite;
+        }
+
+        @keyframes glow {
+            0%, 100% {
+                box-shadow: 0 8px 16px rgba(245, 101, 101, 0.4);
+            }
+            50% {
+                box-shadow: 0 8px 24px rgba(245, 101, 101, 0.6);
+            }
         }
 
         .arbitrage-card::before {
@@ -536,7 +553,8 @@
 
                 if (result.success) {
                     allStrategies = result.data;
-                    displayStrategies(allStrategies);
+                    // 应用当前的筛选状态，而不是直接显示全部
+                    applyCurrentFilter();
                     updateStats(allStrategies);
                     document.getElementById('last-update').textContent = new Date().toLocaleTimeString('zh-CN');
                     document.getElementById('error-message').innerHTML = '';
@@ -549,6 +567,15 @@
 
             // 同时加载套利机会
             loadArbitrageOpportunities();
+        }
+
+        // 应用当前筛选状态
+        function applyCurrentFilter() {
+            let filtered = allStrategies;
+            if (currentFilter !== 'all') {
+                filtered = allStrategies.filter(s => s.name.includes(currentFilter));
+            }
+            displayStrategies(filtered);
         }
 
         async function loadArbitrageOpportunities() {
@@ -577,15 +604,64 @@
 
             container.innerHTML = opportunities.map(opp => {
                 const typeText = getOpportunityTypeText(opp.type);
+                const confirmedClass = opp.is_confirmed ? 'confirmed' : '';
+                const durationText = opp.duration ? `持续 ${opp.duration.toFixed(1)}s` : '新发现';
+
+                // 如果有关联的策略详情，显示完整的价格信息
+                let componentsHTML = '';
+                if (opp.strategy && opp.strategy.components && opp.strategy.components.length > 0) {
+                    componentsHTML = `
+                        <div class="components-list" style="margin-top: 12px;">
+                            <div class="components-header">代币价格详情</div>
+                            ${opp.strategy.components.map(component => {
+                                const priceType = component.coefficient > 0 ? 'ASK' : 'BID';
+                                const priceLabel = component.coefficient > 0 ? '买入价' : '卖出价';
+                                const priceColor = component.coefficient > 0 ? '#e6fffa' : '#fff5f5';
+                                const priceTextColor = component.coefficient > 0 ? '#065f46' : '#7f1d1d';
+
+                                return `
+                                    <div class="component-item ${!component.available ? 'component-unavailable' : ''}">
+                                        <div class="component-info">
+                                            <div class="component-symbol">
+                                                ${component.symbol}
+                                                ${component.available ? `
+                                                    <span class="market-badge" style="margin-left: 5px; background: ${priceColor}; color: ${priceTextColor}; font-weight: 600;">
+                                                        ${priceType} (${priceLabel})
+                                                    </span>
+                                                ` : ''}
+                                            </div>
+                                            ${component.available ? `
+                                                <div class="component-details">
+                                                    <span class="exchange-badge exchange-${component.exchange.toLowerCase()}">${component.exchange}</span>
+                                                    <span class="market-badge">${component.market_type}</span>
+                                                </div>
+                                            ` : ''}
+                                        </div>
+                                        ${component.available ? `
+                                            <div class="component-price" style="font-weight: 600; font-size: 15px;">$${component.price.toFixed(6)}</div>
+                                        ` : `
+                                            <span class="unavailable-badge">无数据</span>
+                                        `}
+                                    </div>
+                                `;
+                            }).join('')}
+                        </div>
+                    `;
+                }
+
                 return `
-                    <div class="arbitrage-card">
-                        <div class="arbitrage-symbol">${opp.symbol}</div>
-                        <div class="arbitrage-type">${typeText}</div>
+                    <div class="arbitrage-card ${confirmedClass}">
+                        <div class="arbitrage-symbol">
+                            ${opp.symbol}
+                            ${opp.is_confirmed ? '<span style="margin-left: 10px; font-size: 14px;">🔥 已确认</span>' : ''}
+                        </div>
+                        <div class="arbitrage-type">${typeText} · ${durationText}</div>
                         <div class="arbitrage-spread">+${opp.spread_percent.toFixed(3)}%</div>
                         <div class="arbitrage-path">
                             <div>${opp.buy_from} → ${opp.sell_to}</div>
                             <div style="margin-top: 5px; font-size: 12px;">${opp.description}</div>
                         </div>
+                        ${componentsHTML}
                     </div>
                 `;
             }).join('');
@@ -622,13 +698,8 @@
             document.getElementById('filter-' + coin.toLowerCase()).style.background = '#667eea';
             document.getElementById('filter-' + coin.toLowerCase()).style.color = 'white';
 
-            // 筛选策略
-            let filtered = allStrategies;
-            if (coin !== 'all') {
-                filtered = allStrategies.filter(s => s.name.includes(coin));
-            }
-
-            displayStrategies(filtered);
+            // 应用筛选
+            applyCurrentFilter();
         }
 
         function sortStrategies(strategies) {
@@ -716,12 +787,12 @@
                         ` : ''}
 
                         <div class="components-list">
-                            <div class="components-header">代币价格</div>
+                            <div class="components-header">代币价格详情</div>
                             ${strategy.components.map(component => {
-                                // 根据策略类型和系数确定价格类型
-                                // +A-B: coefficient > 0 用 ASK, coefficient < 0 用 BID
-                                // -A+B: coefficient < 0 用 BID, coefficient > 0 用 ASK
+                                // 根据系数确定价格类型
+                                // coefficient > 0: ASK (买入价), coefficient < 0: BID (卖出价)
                                 const priceType = component.coefficient > 0 ? 'ASK' : 'BID';
+                                const priceLabel = component.coefficient > 0 ? '买入价' : '卖出价';
                                 const priceColor = component.coefficient > 0 ? '#e6fffa' : '#fff5f5';
                                 const priceTextColor = component.coefficient > 0 ? '#065f46' : '#7f1d1d';
 
@@ -730,10 +801,9 @@
                                         <div class="component-info">
                                             <div class="component-symbol">
                                                 ${component.symbol}
-                                                <span class="component-coefficient">(${component.coefficient > 0 ? '+' : ''}${component.coefficient})</span>
                                                 ${component.available ? `
-                                                    <span class="market-badge" style="margin-left: 5px; background: ${priceColor}; color: ${priceTextColor};">
-                                                        ${priceType}
+                                                    <span class="market-badge" style="margin-left: 5px; background: ${priceColor}; color: ${priceTextColor}; font-weight: 600;">
+                                                        ${priceType} (${priceLabel})
                                                     </span>
                                                 ` : ''}
                                             </div>
@@ -745,7 +815,7 @@
                                             ` : ''}
                                         </div>
                                         ${component.available ? `
-                                            <div class="component-price">$${component.price.toFixed(6)}</div>
+                                            <div class="component-price" style="font-weight: 600; font-size: 15px;">$${component.price.toFixed(6)}</div>
                                         ` : `
                                             <span class="unavailable-badge">无数据</span>
                                         `}

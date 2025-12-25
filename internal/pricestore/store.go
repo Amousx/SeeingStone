@@ -23,14 +23,19 @@ type PriceStore struct {
 	// Symbol标准化映射表
 	// 用于解决不同交易所symbol名称不一致的问题
 	symbolNormalizer *SymbolNormalizer
+
+	// 套利机会历史跟踪
+	// key: symbol_type_buyFrom_sellTo, value: tracker
+	opportunityHistory map[string]*opportunityTracker
 }
 
 // NewPriceStore 创建价格存储器
 func NewPriceStore() *PriceStore {
 	return &PriceStore{
-		byExchange:       make(map[common.Exchange]map[string]*common.Price),
-		bySymbol:         make(map[string]map[string]*common.Price),
-		symbolNormalizer: NewSymbolNormalizer(),
+		byExchange:         make(map[common.Exchange]map[string]*common.Price),
+		bySymbol:           make(map[string]map[string]*common.Price),
+		symbolNormalizer:   NewSymbolNormalizer(),
+		opportunityHistory: make(map[string]*opportunityTracker),
 	}
 }
 
@@ -74,29 +79,43 @@ func (ps *PriceStore) UpdatePrice(price *common.Price) bool {
 }
 
 // shouldUpdate 判断是否应该更新价格
-// 策略：
-// 1. 如果现有数据超过10秒未更新，接受新数据（REST兜底）
-// 2. 如果新数据的时间戳更新，接受新数据
-// 3. 否则拒绝更新（防止旧数据覆盖新数据）
+// 新策略（修复架构性问题）：
+// 1. WebSocket数据优先级高于REST数据
+// 2. 使用Timestamp（交易所时间）判断数据新鲜度，而不是LastUpdated（本地接收时间）
+// 3. REST数据不覆盖WebSocket数据（除非WebSocket数据过期）
+// 4. 如果现有数据超过60秒未更新，接受任何新数据（REST兜底）
 func (ps *PriceStore) shouldUpdate(existing, new *common.Price) bool {
 	now := time.Now()
 
-	// 现有数据超过10秒没更新，接受任何新数据（WS可能断了，REST兜底）
-	if now.Sub(existing.LastUpdated) > 10*time.Second {
+	// 规则1：如果现有数据超过60秒没更新（LastUpdated），接受任何新数据（WS可能断了，REST兜底）
+	if now.Sub(existing.LastUpdated) > 60*time.Second {
 		return true
 	}
 
-	// 新数据的时间戳更新，接受
-	if new.LastUpdated.After(existing.LastUpdated) {
+	// 规则2：WebSocket数据优先级高于REST数据
+	// 如果现有数据是WebSocket，新数据是REST，不更新（除非WebSocket数据过期，已被规则1处理）
+	if existing.Source == common.PriceSourceWebSocket && new.Source == common.PriceSourceREST {
+		return false
+	}
+
+	// 规则3：如果现有数据是REST，新数据是WebSocket，立即更新
+	if existing.Source == common.PriceSourceREST && new.Source == common.PriceSourceWebSocket {
 		return true
 	}
 
-	// 新数据的价格时间戳更新，接受
+	// 规则4：同源数据，比较Timestamp（交易所时间）
+	// 注意：对于REST数据，Timestamp可能等于LastUpdated（因为没有交易所时间戳）
 	if new.Timestamp.After(existing.Timestamp) {
 		return true
 	}
 
-	// 否则拒绝（防止旧数据覆盖）
+	// 规则5：如果Timestamp相同或更旧，但LastUpdated更新，也接受
+	// （处理某些交易所Timestamp精度不够的情况）
+	if new.LastUpdated.After(existing.LastUpdated) {
+		return true
+	}
+
+	// 否则拒绝（防止旧数据覆盖新数据）
 	return false
 }
 
@@ -135,6 +154,11 @@ func (ps *PriceStore) GetPrice(exchange common.Exchange, marketType common.Marke
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 
+	return ps.getPriceInternal(exchange, marketType, symbol)
+}
+
+// getPriceInternal 内部版本，不获取锁（调用者需要持有锁）
+func (ps *PriceStore) getPriceInternal(exchange common.Exchange, marketType common.MarketType, symbol string) *common.Price {
 	exchangeKey := ps.makeExchangeKey(marketType, symbol)
 	if exchangeMap, exists := ps.byExchange[exchange]; exists {
 		return exchangeMap[exchangeKey]
@@ -634,13 +658,23 @@ func (ps *PriceStore) calculateSTGZROStrategy() *CustomStrategy {
 
 // ArbitrageOpportunity 套利机会
 type ArbitrageOpportunity struct {
-	Type         string  `json:"type"`          // "major_coin_spread", "stg_zro_spread", "large_cap_spread"
-	Symbol       string  `json:"symbol"`        // 币种符号
-	Description  string  `json:"description"`   // 描述
-	SpreadPercent float64 `json:"spread_percent"` // 价差百分比
-	BuyFrom      string  `json:"buy_from"`      // 买入位置
-	SellTo       string  `json:"sell_to"`       // 卖出位置
-	Strategy     *CustomStrategy `json:"strategy,omitempty"` // 关联的策略详情
+	Type          string          `json:"type"`               // "major_coin_spread", "stg_zro_spread", "large_cap_spread"
+	Symbol        string          `json:"symbol"`             // 币种符号
+	Description   string          `json:"description"`        // 描述
+	SpreadPercent float64         `json:"spread_percent"`     // 价差百分比
+	BuyFrom       string          `json:"buy_from"`           // 买入位置
+	SellTo        string          `json:"sell_to"`            // 卖出位置
+	Strategy      *CustomStrategy `json:"strategy,omitempty"` // 关联的策略详情
+	FirstSeen     time.Time       `json:"first_seen"`         // 首次发现时间
+	Duration      float64         `json:"duration"`           // 持续时长（秒）
+	IsConfirmed   bool            `json:"is_confirmed"`       // 是否确认（持续>=6秒）
+}
+
+// opportunityTracker 套利机会跟踪器
+type opportunityTracker struct {
+	FirstSeen     time.Time
+	LastSeen      time.Time
+	SpreadPercent float64
 }
 
 // GetArbitrageOpportunities 获取当前可套利策略
@@ -659,21 +693,21 @@ func (ps *PriceStore) GetArbitrageOpportunities() []*ArbitrageOpportunity {
 
 	// 定义大市值币种（市值>2B，根据2024-2025年数据）
 	largeCapCoins := map[string]bool{
-		"BTCUSDT":  true, // Bitcoin
-		"ETHUSDT":  true, // Ethereum
-		"SOLUSDT":  true, // Solana
-		"BNBUSDT":  true, // BNB
-		"XRPUSDT":  true, // XRP
-		"ADAUSDT":  true, // Cardano
-		"DOGEUSDT": true, // Dogecoin
-		"TRXUSDT":  true, // TRON
-		"LINKUSDT": true, // Chainlink
-		"AVAXUSDT": true, // Avalanche
-		"DOTUSDT":  true, // Polkadot
+		"BTCUSDT":   true, // Bitcoin
+		"ETHUSDT":   true, // Ethereum
+		"SOLUSDT":   true, // Solana
+		"BNBUSDT":   true, // BNB
+		"XRPUSDT":   true, // XRP
+		"ADAUSDT":   true, // Cardano
+		"DOGEUSDT":  true, // Dogecoin
+		"TRXUSDT":   true, // TRON
+		"LINKUSDT":  true, // Chainlink
+		"AVAXUSDT":  true, // Avalanche
+		"DOTUSDT":   true, // Polkadot
 		"MATICUSDT": true, // Polygon
-		"UNIUSDT":  true, // Uniswap
-		"LTCUSDT":  true, // Litecoin
-		"ATOMUSDT": true, // Cosmos
+		"UNIUSDT":   true, // Uniswap
+		"LTCUSDT":   true, // Litecoin
+		"ATOMUSDT":  true, // Cosmos
 	}
 
 	// 1. 检查 BTC/ETH/SOL 价差（千1 = 0.1%）
@@ -696,6 +730,45 @@ func (ps *PriceStore) GetArbitrageOpportunities() []*ArbitrageOpportunity {
 		}
 		opps := ps.findSpreadOpportunities(coin, 0.2, "large_cap_spread")
 		opportunities = append(opportunities, opps...)
+	}
+
+	// 4. 更新机会的持续时间和确认状态
+	now := time.Now()
+	currentOppKeys := make(map[string]bool)
+
+	for _, opp := range opportunities {
+		// 生成唯一键
+		key := fmt.Sprintf("%s_%s_%s_%s", opp.Symbol, opp.Type, opp.BuyFrom, opp.SellTo)
+		currentOppKeys[key] = true
+
+		// 检查历史记录
+		tracker, exists := ps.opportunityHistory[key]
+		if !exists {
+			// 首次出现
+			tracker = &opportunityTracker{
+				FirstSeen:     now,
+				LastSeen:      now,
+				SpreadPercent: opp.SpreadPercent,
+			}
+			ps.opportunityHistory[key] = tracker
+		} else {
+			// 已存在，更新最后出现时间和价差
+			tracker.LastSeen = now
+			tracker.SpreadPercent = opp.SpreadPercent
+		}
+
+		// 计算持续时长
+		duration := now.Sub(tracker.FirstSeen).Seconds()
+		opp.FirstSeen = tracker.FirstSeen
+		opp.Duration = duration
+		opp.IsConfirmed = duration >= 6.0 // 持续6秒以上确认
+	}
+
+	// 5. 清理过期的历史记录（超过10秒未出现）
+	for key, tracker := range ps.opportunityHistory {
+		if !currentOppKeys[key] && now.Sub(tracker.LastSeen).Seconds() > 10 {
+			delete(ps.opportunityHistory, key)
+		}
 	}
 
 	return opportunities
@@ -756,13 +829,16 @@ func (ps *PriceStore) findSpreadOpportunities(symbol string, minSpreadPercent fl
 				continue
 			}
 
-			// 计算价差百分比
-			spreadPercent := ((bidPrice - askPrice) / askPrice) * 100
+			// 计算价差百分比（使用统一公式）
+			spreadPercent := (bidPrice - askPrice) * 2 / (bidPrice + askPrice) * 100
 
 			// 检查是否满足最小价差要求
 			if spreadPercent >= minSpreadPercent {
 				buyFrom := fmt.Sprintf("%s %s", buyPrice.Exchange, buyPrice.MarketType)
 				sellTo := fmt.Sprintf("%s %s", sellPrice.Exchange, sellPrice.MarketType)
+
+				// 创建完整的策略详情
+				strategy := ps.calculateSpreadStrategy(buyPrice, sellPrice)
 
 				opportunities = append(opportunities, &ArbitrageOpportunity{
 					Type:          oppType,
@@ -771,14 +847,18 @@ func (ps *PriceStore) findSpreadOpportunities(symbol string, minSpreadPercent fl
 					SpreadPercent: spreadPercent,
 					BuyFrom:       buyFrom,
 					SellTo:        sellTo,
+					Strategy:      strategy, // 填充完整策略详情
 				})
 			}
 
-			// 反向检查
-			spreadPercentReverse := ((askPrice - bidPrice) / bidPrice) * 100
+			// 反向检查（使用统一公式）
+			spreadPercentReverse := (askPrice - bidPrice) * 2 / (askPrice + bidPrice) * 100
 			if spreadPercentReverse >= minSpreadPercent {
 				buyFrom := fmt.Sprintf("%s %s", sellPrice.Exchange, sellPrice.MarketType)
 				sellTo := fmt.Sprintf("%s %s", buyPrice.Exchange, buyPrice.MarketType)
+
+				// 创建完整的策略详情（反向）
+				strategy := ps.calculateSpreadStrategy(sellPrice, buyPrice)
 
 				opportunities = append(opportunities, &ArbitrageOpportunity{
 					Type:          oppType,
@@ -787,6 +867,7 @@ func (ps *PriceStore) findSpreadOpportunities(symbol string, minSpreadPercent fl
 					SpreadPercent: spreadPercentReverse,
 					BuyFrom:       buyFrom,
 					SellTo:        sellTo,
+					Strategy:      strategy, // 填充完整策略详情
 				})
 			}
 		}
@@ -819,9 +900,10 @@ func (ps *PriceStore) checkSTGZROOpportunity(minSpreadPercent float64) *Arbitrag
 }
 
 // getBestPrice 获取指定symbol的最佳价格（最近更新的活跃价格）
+// 注意：此函数不获取锁，调用者需要持有锁
 func (ps *PriceStore) getBestPrice(symbol string, preferredExchange common.Exchange, preferredMarketType common.MarketType) *common.Price {
 	// 首先尝试获取指定交易所和市场类型的价格
-	price := ps.GetPrice(preferredExchange, preferredMarketType, symbol)
+	price := ps.getPriceInternal(preferredExchange, preferredMarketType, symbol)
 	if price != nil && time.Since(price.LastUpdated) <= 60*time.Second {
 		return price
 	}
@@ -857,11 +939,11 @@ func (ps *PriceStore) calculateMultiExchangeSpreadStrategies() []*CustomStrategy
 		exchange   common.Exchange
 		marketType common.MarketType
 	}{
-		{common.ExchangeAster, common.MarketTypeFuture},    // Aster合约
-		{common.ExchangeBinance, common.MarketTypeFuture},  // Binance合约
-		{common.ExchangeLighter, common.MarketTypeFuture},  // Lighter合约
-		{common.ExchangeAster, common.MarketTypeSpot},      // Aster现货
-		{common.ExchangeBinance, common.MarketTypeSpot},    // Binance现货
+		{common.ExchangeAster, common.MarketTypeFuture},   // Aster合约
+		{common.ExchangeBinance, common.MarketTypeFuture}, // Binance合约
+		{common.ExchangeLighter, common.MarketTypeFuture}, // Lighter合约
+		{common.ExchangeAster, common.MarketTypeSpot},     // Aster现货
+		{common.ExchangeBinance, common.MarketTypeSpot},   // Binance现货
 	}
 
 	// 对每个币种计算价差
@@ -869,7 +951,7 @@ func (ps *PriceStore) calculateMultiExchangeSpreadStrategies() []*CustomStrategy
 		// 获取所有交易所的价格
 		prices := make([]*common.Price, 0)
 		for _, ex := range exchanges {
-			price := ps.GetPrice(ex.exchange, ex.marketType, symbol)
+			price := ps.getPriceInternal(ex.exchange, ex.marketType, symbol)
 			if price != nil && time.Since(price.LastUpdated) <= 60*time.Second {
 				prices = append(prices, price)
 			}
@@ -938,9 +1020,11 @@ func (ps *PriceStore) calculateSpreadStrategy(buyPrice, sellPrice *common.Price)
 		return nil
 	}
 
-	// 计算价差
+	// 计算价差（使用统一的公式）
+	// +A-B 公式: (B Bid - A Ask) * 2 / (B Bid + A Ask) * 100
+	// A = buyPrice (Ask), B = sellPrice (Bid)
 	spreadAbsolute := bidPrice - askPrice
-	spreadPercent := (spreadAbsolute / askPrice) * 100
+	spreadPercent := (bidPrice - askPrice) * 2 / (bidPrice + askPrice) * 100
 
 	// 币种名称（去掉USDT后缀）
 	coinName := buyPrice.Symbol
@@ -949,7 +1033,9 @@ func (ps *PriceStore) calculateSpreadStrategy(buyPrice, sellPrice *common.Price)
 	}
 
 	// 构建策略名称和描述
-	name := fmt.Sprintf("%s 价差套利: %s(%s) -> %s(%s)",
+	// A = buyPrice, B = sellPrice，所以是 +A-B
+	name := fmt.Sprintf("+%s-%s 价差套利: %s(%s) -> %s(%s)",
+		coinName,
 		coinName,
 		buyPrice.Exchange,
 		buyPrice.MarketType,
@@ -964,8 +1050,9 @@ func (ps *PriceStore) calculateSpreadStrategy(buyPrice, sellPrice *common.Price)
 		sellPrice.MarketType,
 		coinName)
 
-	formula := fmt.Sprintf("(Sell Bid - Buy Ask) / Buy Ask * 100 = (%.4f - %.4f) / %.4f * 100",
-		bidPrice, askPrice, askPrice)
+	// 使用统一的公式显示
+	formula := fmt.Sprintf("(B Bid - A Ask) × 2 / (B Bid + A Ask) × 100 = (%.4f - %.4f) × 2 / (%.4f + %.4f) × 100",
+		bidPrice, askPrice, bidPrice, askPrice)
 
 	// 使用较新的更新时间
 	updatedAt := buyPrice.LastUpdated
@@ -977,24 +1064,24 @@ func (ps *PriceStore) calculateSpreadStrategy(buyPrice, sellPrice *common.Price)
 		Name:         name,
 		Description:  description,
 		Formula:      formula,
-		StrategyType: "spread",
+		StrategyType: "+A-B", // 统一的策略类型
 		Value:        spreadAbsolute,
 		ValuePercent: spreadPercent,
 		Components: []CustomStrategyToken{
 			{
-				Symbol:      coinName,
+				Symbol:      fmt.Sprintf("A(%s)", coinName), // A = 买入
 				Coefficient: 1.0,
 				Exchange:    buyPrice.Exchange,
 				MarketType:  buyPrice.MarketType,
-				Price:       askPrice,
+				Price:       askPrice, // A Ask
 				Available:   true,
 			},
 			{
-				Symbol:      coinName,
+				Symbol:      fmt.Sprintf("B(%s)", coinName), // B = 卖出
 				Coefficient: -1.0,
 				Exchange:    sellPrice.Exchange,
 				MarketType:  sellPrice.MarketType,
-				Price:       bidPrice,
+				Price:       bidPrice, // B Bid
 				Available:   true,
 			},
 		},

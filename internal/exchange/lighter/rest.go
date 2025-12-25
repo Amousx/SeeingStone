@@ -239,18 +239,20 @@ func fetchMarketDataOnce(apiURL string, marketIDs []int) ([]*common.Price, error
 		// Symbol 需要加上 USDT 后缀
 		symbol := data.Symbol + "USDT"
 
+		now := time.Now()
 		price := &common.Price{
 			Symbol:      symbol,
 			Exchange:    common.ExchangeLighter,
 			MarketType:  marketType,
 			Price:       lastPrice,
-			BidPrice:    bidPrice,
-			AskPrice:    askPrice,
+			BidPrice:    bidPrice, // 注意：REST API用last trade估算，不是真实bid
+			AskPrice:    askPrice, // 注意：REST API用last trade估算，不是真实ask
 			BidQty:      0, // REST API 不提供订单簿数量
 			AskQty:      0,
 			Volume24h:   data.DailyQuoteTokenVolume,
-			Timestamp:   time.Now(),
-			LastUpdated: time.Now(),
+			Timestamp:   now,                    // REST API没有交易所时间戳
+			LastUpdated: now,                    // 本地接收时间
+			Source:      common.PriceSourceREST, // 标记为REST数据源
 		}
 
 		prices = append(prices, price)
