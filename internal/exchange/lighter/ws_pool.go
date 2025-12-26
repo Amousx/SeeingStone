@@ -28,8 +28,9 @@ type WSPoolConnection struct {
 	URL               string
 	Conn              *websocket.Conn
 	Markets           []*Market
-	orderBookData     map[int]*OrderBookData
+	orderBookData     map[int]*OrderBookData     // 快照数据（兼容旧逻辑）
 	marketStatsData   map[int]*MarketStatsData
+	localOrderBooks   map[int]*LocalOrderBook    // 本地维护的订单簿（增量更新）
 	mu                sync.RWMutex
 	reconnect         bool
 	done              chan struct{}
@@ -108,12 +109,19 @@ func (p *WSPool) Close() error {
 
 // NewWSPoolConnection 创建单个 WebSocket 连接
 func NewWSPoolConnection(id int, markets []*Market) *WSPoolConnection {
+	// 初始化本地订单簿
+	localOrderBooks := make(map[int]*LocalOrderBook)
+	for _, market := range markets {
+		localOrderBooks[market.MarketID] = NewLocalOrderBook(market.MarketID, market.Symbol)
+	}
+
 	return &WSPoolConnection{
 		ID:              id,
 		URL:             "wss://mainnet.zklighter.elliot.ai/stream",
 		Markets:         markets,
 		orderBookData:   make(map[int]*OrderBookData),
 		marketStatsData: make(map[int]*MarketStatsData),
+		localOrderBooks: localOrderBooks,
 		reconnect:       true,
 		done:            make(chan struct{}),
 	}
@@ -279,42 +287,91 @@ func (c *WSPoolConnection) processMessage(message []byte) {
 	}
 
 	switch baseMsg.Type {
-	case "update/order_book":
-		var update OrderBookUpdate
-		if err := json.Unmarshal(message, &update); err != nil {
-			log.Printf("[Lighter Pool #%d] Failed to unmarshal order_book: %v", c.ID, err)
+	case "subscribed/order_book":
+		// 订阅时返回的快照数据 - 用于初始化本地订单簿
+		var snapshot OrderBookUpdate
+		if err := json.Unmarshal(message, &snapshot); err != nil {
+			log.Printf("[Lighter Pool #%d] Failed to unmarshal order_book snapshot: %v", c.ID, err)
 			return
 		}
-		c.handleOrderBookUpdate(&update)
+		c.handleOrderBookSnapshot(&snapshot)
+
+	case "update/order_book":
+		// 增量更新 - 应用到本地订单簿
+		var update OrderBookUpdate
+		if err := json.Unmarshal(message, &update); err != nil {
+			log.Printf("[Lighter Pool #%d] Failed to unmarshal order_book update: %v", c.ID, err)
+			return
+		}
+		c.handleOrderBookIncrementalUpdate(&update)
+
+	case "subscribed/market_stats":
+		// 订阅确认消息（market stats 快照）
+		var statsSnapshot MarketStatsUpdate
+		if err := json.Unmarshal(message, &statsSnapshot); err != nil {
+			log.Printf("[Lighter Pool #%d] Failed to unmarshal market_stats snapshot: %v", c.ID, err)
+			return
+		}
+		c.handleMarketStatsUpdate(&statsSnapshot)
 
 	case "update/market_stats":
+		// Market stats 增量更新
 		var update MarketStatsUpdate
 		if err := json.Unmarshal(message, &update); err != nil {
-			log.Printf("[Lighter Pool #%d] Failed to unmarshal market_stats: %v", c.ID, err)
+			log.Printf("[Lighter Pool #%d] Failed to unmarshal market_stats update: %v", c.ID, err)
 			return
 		}
 		c.handleMarketStatsUpdate(&update)
-
-	case "subscribed/order_book":
-		// 订阅确认消息
-		c.handleSubscriptionConfirm(baseMsg.Channel, "order_book")
-
-	case "subscribed/market_stats":
-		// 订阅确认消息
-		c.handleSubscriptionConfirm(baseMsg.Channel, "market_stats")
 	}
 }
 
-// handleOrderBookUpdate 处理订单簿更新
-func (c *WSPoolConnection) handleOrderBookUpdate(update *OrderBookUpdate) {
+// handleOrderBookSnapshot 处理订单簿快照（subscribed/order_book）
+func (c *WSPoolConnection) handleOrderBookSnapshot(snapshot *OrderBookUpdate) {
 	var marketID int
 
 	// 从 channel 解析 market_id: order_book:{MARKET_INDEX} 或 order_book/{MARKET_INDEX}
+	n, err := fmt.Sscanf(snapshot.Channel, "order_book:%d", &marketID)
+	if err != nil || n != 1 {
+		n, err = fmt.Sscanf(snapshot.Channel, "order_book/%d", &marketID)
+		if err != nil || n != 1 {
+			// 尝试从 order_book 数据中获取
+			if snapshot.OrderBook.MarketID > 0 {
+				marketID = snapshot.OrderBook.MarketID
+			} else {
+				log.Printf("[Lighter Pool #%d] Failed to parse market ID from channel '%s'", c.ID, snapshot.Channel)
+				return
+			}
+		}
+	}
+
+	c.mu.Lock()
+	c.orderBookData[marketID] = &snapshot.OrderBook
+
+	// 从快照初始化本地订单簿
+	if localOB, exists := c.localOrderBooks[marketID]; exists {
+		localOB.InitializeFromSnapshot(
+			snapshot.OrderBook.Bids,
+			snapshot.OrderBook.Asks,
+			snapshot.OrderBook.Nonce,
+			snapshot.Offset,
+		)
+		log.Printf("[Lighter Pool #%d] ✓ Order book snapshot initialized for market %d", c.ID, marketID)
+	}
+	c.mu.Unlock()
+
+	// 合并数据并发送
+	c.sendCombinedPrice(marketID)
+}
+
+// handleOrderBookIncrementalUpdate 处理增量订单簿更新（update/order_book）
+func (c *WSPoolConnection) handleOrderBookIncrementalUpdate(update *OrderBookUpdate) {
+	var marketID int
+
+	// 从 channel 解析 market_id
 	n, err := fmt.Sscanf(update.Channel, "order_book:%d", &marketID)
 	if err != nil || n != 1 {
 		n, err = fmt.Sscanf(update.Channel, "order_book/%d", &marketID)
 		if err != nil || n != 1 {
-			// 尝试从 order_book 数据中获取
 			if update.OrderBook.MarketID > 0 {
 				marketID = update.OrderBook.MarketID
 			} else {
@@ -324,11 +381,43 @@ func (c *WSPoolConnection) handleOrderBookUpdate(update *OrderBookUpdate) {
 		}
 	}
 
-	c.mu.Lock()
-	c.orderBookData[marketID] = &update.OrderBook
-	c.mu.Unlock()
+	c.mu.RLock()
+	localOB, exists := c.localOrderBooks[marketID]
+	c.mu.RUnlock()
 
-	// 合并数据并发送
+	if !exists {
+		log.Printf("[Lighter Pool #%d] Local order book not found for market %d", c.ID, marketID)
+		return
+	}
+
+	// 应用增量更新（带连续性验证）
+	applied, needsResync := localOB.ApplyIncrementalUpdate(
+		update.OrderBook.Bids,
+		update.OrderBook.Asks,
+		update.OrderBook.BeginNonce,
+		update.OrderBook.Nonce,
+		update.Offset,
+	)
+
+	// 如果需要重新同步，触发 REST 快照获取
+	if needsResync {
+		log.Printf("[Lighter Pool #%d] ⚠️  Triggering REST snapshot resync for market %d", c.ID, marketID)
+		go c.resyncOrderBookFromREST(marketID)
+		return
+	}
+
+	if !applied {
+		// 应用失败但不需要重新同步（例如：未初始化）
+		return
+	}
+
+	// 检查是否需要定期全量同步
+	if localOB.NeedsPeriodicSync() {
+		log.Printf("[Lighter Pool #%d] 🔄 Periodic sync triggered for market %d", c.ID, marketID)
+		go c.resyncOrderBookFromREST(marketID)
+	}
+
+	// 重新计算并发送价格
 	c.sendCombinedPrice(marketID)
 }
 
@@ -344,35 +433,25 @@ func (c *WSPoolConnection) handleMarketStatsUpdate(update *MarketStatsUpdate) {
 	c.sendCombinedPrice(marketID)
 }
 
-// handleSubscriptionConfirm 处理订阅确认消息
-func (c *WSPoolConnection) handleSubscriptionConfirm(channel string, streamType string) {
-	// 从 channel 解析 market_id
-	var marketID int
-	n, err := fmt.Sscanf(channel, streamType+":%d", &marketID)
-	if err != nil || n != 1 {
-		n, err = fmt.Sscanf(channel, streamType+"/%d", &marketID)
-		if err != nil || n != 1 {
-			// 无法解析 market_id，记录日志
-			log.Printf("[Lighter Pool #%d] Subscription confirmed: %s", c.ID, channel)
-			return
-		}
-	}
+// resyncOrderBookFromREST 从 REST API 重新同步订单簿（用于恢复连续性）
+func (c *WSPoolConnection) resyncOrderBookFromREST(marketID int) {
+	// TODO: 实现 REST API 快照获取
+	// 目前的实现策略：
+	// 1. 调用 Lighter REST API 获取完整订单簿快照
+	// 2. 使用快照重新初始化本地订单簿
+	// 3. 重置同步计数器
 
-	// 查找市场名称
+	log.Printf("[Lighter Pool #%d] REST snapshot resync for market %d - NOT IMPLEMENTED YET", c.ID, marketID)
+
+	// 临时解决方案：标记本地订单簿为未初始化，等待下次 WS 快照
 	c.mu.RLock()
-	var marketName string
-	for _, m := range c.Markets {
-		if m.MarketID == marketID {
-			marketName = m.Symbol
-			break
-		}
-	}
+	localOB, exists := c.localOrderBooks[marketID]
 	c.mu.RUnlock()
 
-	if marketName != "" {
-		log.Printf("[Lighter Pool #%d] ✓ Subscribed to %s for %s (ID: %d)", c.ID, streamType, marketName, marketID)
-	} else {
-		log.Printf("[Lighter Pool #%d] ✓ Subscribed to %s/%d", c.ID, streamType, marketID)
+	if exists {
+		// 不清空订单簿，但重置同步计数器，避免频繁触发
+		localOB.ResetSyncCounter()
+		log.Printf("[Lighter Pool #%d] Reset sync counter for market %d, waiting for next WS snapshot", c.ID, marketID)
 	}
 }
 
@@ -397,89 +476,89 @@ func (c *WSPoolConnection) sendCombinedPrice(marketID int) {
 		return
 	}
 
-	// 获取 order book 和 market stats
-	orderBook, hasOrderBook := c.orderBookData[marketID]
+	// 优先使用本地订单簿（增量更新的准确数据）
+	localOB, hasLocalOB := c.localOrderBooks[marketID]
 	marketStats, hasMarketStats := c.marketStatsData[marketID]
 
-	// 需要至少有某种价格数据
-	hasBothSides := hasOrderBook && len(orderBook.Bids) > 0 && len(orderBook.Asks) > 0
-	hasMarkPrice := hasMarketStats && marketStats.MarkPrice != "" && marketStats.MarkPrice != "0"
-	hasPartialOrderBook := hasOrderBook && (len(orderBook.Bids) > 0 || len(orderBook.Asks) > 0)
-
-	if !hasBothSides && !hasMarkPrice && !hasPartialOrderBook {
-		return
-	}
-
-	// 使用 mark_price 作为基准价格
-	var markPrice float64
 	var bidPrice, askPrice, bidQty, askQty float64
+	var markPrice float64
+	hasBothSides := false
 
-	if hasMarketStats {
-		markPrice = parseFloat(marketStats.MarkPrice)
-	}
+	// 1. 优先从本地订单簿获取最优 bid/ask
+	if hasLocalOB {
+		const minNotional = 5.0
+		bidCount, askCount := localOB.GetStats()
 
-	// 如果没有mark price但有完整order book，使用order book中间价
-	if markPrice == 0 && hasBothSides {
-		bidPriceOB, _, hasBid := c.getBestBid(orderBook.Bids)
-		askPriceOB, _, hasAsk := c.getBestAsk(orderBook.Asks)
-		if hasBid && hasAsk {
-			markPrice = (bidPriceOB + askPriceOB) / 2
-		}
-	}
+		if bidCount > 0 && askCount > 0 {
+			var hasBid, hasAsk bool
+			bidPrice, bidQty, hasBid = localOB.GetBestBid(minNotional)
+			askPrice, askQty, hasAsk = localOB.GetBestAsk(minNotional)
 
-	// 如果有完整的order book，使用实际的bid/ask（过滤低流动性订单）
-	if hasBothSides {
-		var hasBid, hasAsk bool
-		bidPrice, bidQty, hasBid = c.getBestBid(orderBook.Bids)
-		askPrice, askQty, hasAsk = c.getBestAsk(orderBook.Asks)
-
-		if hasBid && hasAsk {
-			if markPrice == 0 {
+			if hasBid && hasAsk {
+				hasBothSides = true
 				markPrice = (bidPrice + askPrice) / 2
 			}
-		} else {
-			// 没有足够流动性的订单，降级为部分订单簿处理
-			hasBothSides = false
-			hasPartialOrderBook = hasBid || hasAsk
 		}
 	}
 
-	if !hasBothSides && hasPartialOrderBook {
-		// 只有部分order book数据
-		if len(orderBook.Bids) > 0 {
-			var hasBid bool
+	// 2. 如果本地订单簿没有数据，回退到快照数据（兼容性）
+	if !hasBothSides {
+		orderBook, hasOrderBook := c.orderBookData[marketID]
+		hasPartialOrderBook := hasOrderBook && (len(orderBook.Bids) > 0 || len(orderBook.Asks) > 0)
+		hasMarkPrice := hasMarketStats && marketStats.MarkPrice != "" && marketStats.MarkPrice != "0"
+
+		if !hasPartialOrderBook && !hasMarkPrice {
+			return
+		}
+
+		hasBothSides = hasOrderBook && len(orderBook.Bids) > 0 && len(orderBook.Asks) > 0
+
+		if hasBothSides {
+			var hasBid, hasAsk bool
 			bidPrice, bidQty, hasBid = c.getBestBid(orderBook.Bids)
-			if hasBid {
-				askPrice = bidPrice * 1.0002
-				askQty = 0
-				if markPrice == 0 {
-					markPrice = bidPrice * 1.0001
-				}
-			} else {
-				// 没有有效的 bid
-				return
-			}
-		} else if len(orderBook.Asks) > 0 {
-			var hasAsk bool
 			askPrice, askQty, hasAsk = c.getBestAsk(orderBook.Asks)
-			if hasAsk {
-				bidPrice = askPrice * 0.9998
-				bidQty = 0
-				if markPrice == 0 {
-					markPrice = askPrice * 0.9999
-				}
+
+			if hasBid && hasAsk {
+				markPrice = (bidPrice + askPrice) / 2
 			} else {
-				// 没有有效的 ask
-				return
+				hasBothSides = false
 			}
 		}
-	} else if !hasBothSides && !hasPartialOrderBook {
-		// 只有mark price
-		spread := markPrice * 0.0001
-		bidPrice = markPrice - spread
-		askPrice = markPrice + spread
-		bidQty = 0
-		askQty = 0
+
+		if !hasBothSides && hasPartialOrderBook {
+			// 只有部分order book数据
+			if len(orderBook.Bids) > 0 {
+				var hasBid bool
+				bidPrice, bidQty, hasBid = c.getBestBid(orderBook.Bids)
+				if hasBid {
+					askPrice = bidPrice * 1.0002
+					askQty = 0
+					markPrice = bidPrice * 1.0001
+				} else {
+					return
+				}
+			} else if len(orderBook.Asks) > 0 {
+				var hasAsk bool
+				askPrice, askQty, hasAsk = c.getBestAsk(orderBook.Asks)
+				if hasAsk {
+					bidPrice = askPrice * 0.9998
+					bidQty = 0
+					markPrice = askPrice * 0.9999
+				} else {
+					return
+				}
+			}
+		} else if !hasBothSides && hasMarkPrice {
+			// 只有mark price
+			if hasMarketStats {
+				markPrice = parseFloat(marketStats.MarkPrice)
+			}
+			spread := markPrice * 0.0001
+			bidPrice = markPrice - spread
+			askPrice = markPrice + spread
+			bidQty = 0
+			askQty = 0
+		}
 	}
 
 	// 解析交易量
@@ -494,10 +573,10 @@ func (c *WSPoolConnection) sendCombinedPrice(marketID int) {
 		marketType = common.MarketTypeFuture
 	}
 
-	// 获取时间戳
+	// 获取时间戳（尝试从快照数据获取，否则使用当前时间）
 	var timestamp time.Time
-	if hasOrderBook && orderBook.Timestamp > 0 {
-		timestamp = time.UnixMilli(orderBook.Timestamp)
+	if orderBookData, exists := c.orderBookData[marketID]; exists && orderBookData.Timestamp > 0 {
+		timestamp = time.UnixMilli(orderBookData.Timestamp)
 	} else {
 		timestamp = time.Now()
 	}

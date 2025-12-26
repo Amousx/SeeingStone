@@ -39,6 +39,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/custom-strategies", s.handleCustomStrategies)
 	mux.HandleFunc("/api/arbitrage-opportunities", s.handleArbitrageOpportunities)
 	mux.HandleFunc("/api/debug/prices", s.handleDebugPrices)
+	mux.HandleFunc("/api/prices/", s.handlePricesBySymbol)
 
 	// Static files - 使用子文件系统来正确访问 static 目录
 	staticDir, err := fs.Sub(staticFS, "static")
@@ -180,6 +181,54 @@ func (s *Server) handleArbitrageOpportunities(w http.ResponseWriter, r *http.Req
 		"count":   len(opportunities),
 		"data":    opportunities,
 	})
+}
+
+// handlePricesBySymbol 处理按币种查询价格的请求
+func (s *Server) handlePricesBySymbol(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// 从 URL 路径中提取 symbol: /api/prices/BTCUSDT
+	path := r.URL.Path
+	symbol := path[len("/api/prices/"):]
+
+	if symbol == "" {
+		http.Error(w, "Symbol is required", http.StatusBadRequest)
+		return
+	}
+
+	// 获取该币种的所有价格
+	prices := s.store.GetPricesBySymbol(symbol)
+
+	if len(prices) == 0 {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]interface{}{})
+		return
+	}
+
+	// 转换为 JSON 友好的格式
+	result := make([]map[string]interface{}, 0, len(prices))
+	for _, price := range prices {
+		result = append(result, map[string]interface{}{
+			"symbol":       price.Symbol,
+			"exchange":     price.Exchange,
+			"market_type":  price.MarketType,
+			"price":        price.Price,
+			"bid_price":    price.BidPrice,
+			"ask_price":    price.AskPrice,
+			"bid_qty":      price.BidQty,
+			"ask_qty":      price.AskQty,
+			"volume_24h":   price.Volume24h,
+			"timestamp":    price.Timestamp,
+			"last_updated": price.LastUpdated,
+			"source":       price.Source,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
 }
 
 // handleDebugPrices 调试端点：显示各个交易所的原始价格数据样本

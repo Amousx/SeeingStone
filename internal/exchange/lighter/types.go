@@ -26,12 +26,13 @@ type OrderBookUpdate struct {
 }
 
 type OrderBookData struct {
-	Code      int           `json:"code"`
-	MarketID  int           `json:"market_id,omitempty"` // 用于 order_book/all
-	Asks      []PriceLevel  `json:"asks"`
-	Bids      []PriceLevel  `json:"bids"`
-	Nonce     int64         `json:"nonce"`
-	Timestamp int64         `json:"timestamp"`
+	Code       int           `json:"code"`
+	MarketID   int           `json:"market_id,omitempty"` // 用于 order_book/all
+	Asks       []PriceLevel  `json:"asks"`
+	Bids       []PriceLevel  `json:"bids"`
+	BeginNonce int64         `json:"begin_nonce,omitempty"` // 用于增量更新的连续性验证
+	Nonce      int64         `json:"nonce"`
+	Timestamp  int64         `json:"timestamp"`
 }
 
 type PriceLevel struct {
@@ -67,4 +68,10 @@ type Market struct {
 	MarketID int    `json:"market_id"`
 	Symbol   string `json:"symbol"`
 	Type     string `json:"type"` // "perp" 或 "spot"
+}
+
+// Order 订单结构（本地维护）
+type Order struct {
+	Price  float64
+	Amount float64
 }
