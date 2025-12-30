@@ -710,9 +710,9 @@ func (ps *PriceStore) GetArbitrageOpportunities() []*ArbitrageOpportunity {
 		"ATOMUSDT":  true, // Cosmos
 	}
 
-	// 1. 检查 BTC/ETH/SOL 价差（千1 = 0.1%）
+	// 1. 检查 BTC/ETH/SOL 价差（千1.5 = 0.15%）
 	for _, coin := range majorCoins {
-		opps := ps.findSpreadOpportunities(coin, 0.1, "major_coin_spread")
+		opps := ps.findSpreadOpportunities(coin, 0.15, "major_coin_spread")
 		opportunities = append(opportunities, opps...)
 	}
 
@@ -722,13 +722,13 @@ func (ps *PriceStore) GetArbitrageOpportunities() []*ArbitrageOpportunity {
 		opportunities = append(opportunities, stgZroOpp)
 	}
 
-	// 3. 检查大市值币种价差（千2 = 0.2%）
+	// 3. 检查大市值币种价差（千3 = 0.3%）
 	for coin := range largeCapCoins {
 		// 跳过已经在主流币种中检查过的
 		if coin == "BTCUSDT" || coin == "ETHUSDT" || coin == "SOLUSDT" {
 			continue
 		}
-		opps := ps.findSpreadOpportunities(coin, 0.2, "large_cap_spread")
+		opps := ps.findSpreadOpportunities(coin, 0.3, "large_cap_spread")
 		opportunities = append(opportunities, opps...)
 	}
 
@@ -904,7 +904,7 @@ func (ps *PriceStore) checkSTGZROOpportunity(minSpreadPercent float64) *Arbitrag
 func (ps *PriceStore) getBestPrice(symbol string, preferredExchange common.Exchange, preferredMarketType common.MarketType) *common.Price {
 	// 首先尝试获取指定交易所和市场类型的价格
 	price := ps.getPriceInternal(preferredExchange, preferredMarketType, symbol)
-	if price != nil && time.Since(price.LastUpdated) <= 60*time.Second {
+	if price != nil && time.Since(price.LastUpdated) <= 30*time.Second {
 		return price
 	}
 
