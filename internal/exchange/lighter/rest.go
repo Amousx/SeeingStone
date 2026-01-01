@@ -14,8 +14,9 @@ import (
 
 // OrderBookDetailsResponse REST API 响应
 type OrderBookDetailsResponse struct {
-	Code              int                     `json:"code"`
-	OrderBookDetails  []OrderBookDetailItem   `json:"order_book_details"`
+	Code                 int                   `json:"code"`
+	OrderBookDetails     []OrderBookDetailItem `json:"order_book_details"`
+	SpotOrderBookDetails []OrderBookDetailItem `json:"spot_order_book_details"`
 }
 
 // OrderBookDetailItem 订单簿详情
@@ -181,6 +182,8 @@ func fetchMarketDataOnce(apiURL string, marketIDs []int) ([]*common.Price, error
 
 	// 转换为 Price 对象
 	prices := make([]*common.Price, 0, len(marketIDSet))
+
+	// 处理futures市场数据
 	for _, data := range apiResp.OrderBookDetails {
 		// 只处理我们订阅的市场
 		if !marketIDSet[data.MarketID] {
@@ -188,10 +191,12 @@ func fetchMarketDataOnce(apiURL string, marketIDs []int) ([]*common.Price, error
 		}
 		totalMarkets++
 
+		// Futures symbol格式为 "PYTH"，需要加上 USDT 后缀
+		symbol := data.Symbol + "USDT"
+
 		// 处理所有市场，不仅仅是 active 的（可能暂时 inactive 但仍有价值）
 		if data.Status != "active" {
 			// 尝试使用缓存
-			symbol := data.Symbol + "USDT"
 			key := fmt.Sprintf("%s-%s-%s", common.ExchangeLighter, common.MarketTypeFuture, symbol)
 
 			priceCacheMu.RLock()
@@ -210,7 +215,6 @@ func fetchMarketDataOnce(apiURL string, marketIDs []int) ([]*common.Price, error
 		if lastPrice == 0 || lastPrice < 0.0000001 {
 			noPrice++
 			// 尝试从缓存获取价格
-			symbol := data.Symbol + "USDT"
 			key := fmt.Sprintf("%s-%s-%s", common.ExchangeLighter, common.MarketTypeFuture, symbol)
 
 			priceCacheMu.RLock()
@@ -233,11 +237,91 @@ func fetchMarketDataOnce(apiURL string, marketIDs []int) ([]*common.Price, error
 		bidPrice := lastPrice - spread
 		askPrice := lastPrice + spread
 
-		// 所有 Lighter 市场都是永续合约
+		// futures市场类型
 		marketType := common.MarketTypeFuture
 
-		// Symbol 需要加上 USDT 后缀
-		symbol := data.Symbol + "USDT"
+		now := time.Now()
+		price := &common.Price{
+			Symbol:      symbol,
+			Exchange:    common.ExchangeLighter,
+			MarketType:  marketType,
+			Price:       lastPrice,
+			BidPrice:    bidPrice, // 注意：REST API用last trade估算，不是真实bid
+			AskPrice:    askPrice, // 注意：REST API用last trade估算，不是真实ask
+			BidQty:      0, // REST API 不提供订单簿数量
+			AskQty:      0,
+			Volume24h:   data.DailyQuoteTokenVolume,
+			Timestamp:   now,                    // REST API没有交易所时间戳
+			LastUpdated: now,                    // 本地接收时间
+			Source:      common.PriceSourceREST, // 标记为REST数据源
+		}
+
+		prices = append(prices, price)
+	}
+
+	// 处理spot市场数据
+	for _, data := range apiResp.SpotOrderBookDetails {
+		// 只处理我们订阅的市场
+		if !marketIDSet[data.MarketID] {
+			continue
+		}
+		totalMarkets++
+
+		// Spot symbol格式为 "LIT/USDC"，需要将斜杠去掉（例如 "LIT/USDC" -> "LITUSDC"）
+		symbol := data.Symbol
+		// 去掉斜杠
+		for i := 0; i < len(symbol); i++ {
+			if symbol[i] == '/' {
+				symbol = symbol[:i] + symbol[i+1:]
+				break
+			}
+		}
+
+		// 处理所有市场，不仅仅是 active 的（可能暂时 inactive 但仍有价值）
+		if data.Status != "active" {
+			// 尝试使用缓存
+			key := fmt.Sprintf("%s-%s-%s", common.ExchangeLighter, common.MarketTypeSpot, symbol)
+
+			priceCacheMu.RLock()
+			cachedPrice, exists := priceCache[key]
+			priceCacheMu.RUnlock()
+
+			if exists && time.Since(cachedPrice.LastUpdated) < 10*time.Minute {
+				prices = append(prices, cachedPrice)
+				fromCache++
+			}
+			continue
+		}
+		activeMarkets++
+
+		lastPrice := data.LastTradePrice
+		if lastPrice == 0 || lastPrice < 0.0000001 {
+			noPrice++
+			// 尝试从缓存获取价格
+			key := fmt.Sprintf("%s-%s-%s", common.ExchangeLighter, common.MarketTypeSpot, symbol)
+
+			priceCacheMu.RLock()
+			cachedPrice, exists := priceCache[key]
+			priceCacheMu.RUnlock()
+
+			if exists && time.Since(cachedPrice.LastUpdated) < 10*time.Minute {
+				// 使用缓存价格
+				prices = append(prices, cachedPrice)
+				fromCache++
+			}
+			continue
+		}
+
+		// 使用 last_trade_price 估算 bid/ask（假设 0.01% 价差）
+		spread := lastPrice * 0.0001
+		if spread < 0.00001 {
+			spread = lastPrice * 0.001 // 对于非常小的价格，使用 0.1% 价差
+		}
+		bidPrice := lastPrice - spread
+		askPrice := lastPrice + spread
+
+		// spot市场类型
+		marketType := common.MarketTypeSpot
 
 		now := time.Now()
 		price := &common.Price{

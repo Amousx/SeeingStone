@@ -192,6 +192,9 @@ func startLighterWSPool(store *pricestore.PriceStore, markets []*lighter.Market,
 	} else {
 		// 更新到 store（冷启动数据）
 		for _, price := range prices {
+			if price.MarketType != "FUTURE" {
+				print("123")
+			}
 			store.UpdatePrice(price)
 		}
 		log.Printf("[Lighter] Loaded %d markets from REST snapshot", len(prices))
