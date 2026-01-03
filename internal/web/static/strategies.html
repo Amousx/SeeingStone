@@ -498,6 +498,14 @@
             </div>
         </div>
 
+        <!-- 汇率监控面板 -->
+        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 8px; padding: 15px; margin-bottom: 20px; color: white;">
+            <h3 style="margin: 0 0 10px 0; font-size: 16px;">💱 实时汇率 (USDT基准)</h3>
+            <div id="exchangeRates" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px;">
+                <div style="text-align: center;">加载中...</div>
+            </div>
+        </div>
+
         <div class="controls">
             <div class="control-group">
                 <div class="control-item">
@@ -546,6 +554,41 @@
         let allStrategies = [];
         let currentFilter = 'all';
 
+
+        // 获取并显示汇率
+        async function fetchExchangeRates() {
+            try {
+                const response = await fetch('/api/exchange-rates');
+                const result = await response.json();
+                
+                if (result.success && result.data) {
+                    const container = document.getElementById('exchangeRates');
+                    container.innerHTML = result.data.map(rate => {
+                        const statusClass = rate.is_default_rate ? 'default' : 'live';
+                        const statusText = rate.is_default_rate ? '默认' : '实时';
+                        const bgColor = rate.is_default_rate ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.25)';
+                        
+                        return `
+                            <div style="background: ${bgColor}; border-radius: 6px; padding: 10px; text-align: center;">
+                                <div style="font-weight: 600; font-size: 14px; margin-bottom: 5px;">
+                                    ${rate.from_currency}/USDT
+                                </div>
+                                <div style="font-size: 20px; font-weight: 700; margin-bottom: 3px;">
+                                    ${rate.rate.toFixed(4)}
+                                </div>
+                                <div style="font-size: 11px; opacity: 0.8;">
+                                    ${statusText} · ${rate.source}
+                                </div>
+                            </div>
+                        `;
+                    }).join('');
+                }
+            } catch (error) {
+                console.error('获取汇率失败:', error);
+                document.getElementById('exchangeRates').innerHTML = 
+                    '<div style="text-align: center; color: rgba(255,255,255,0.7);">加载失败</div>';
+            }
+        }
         async function loadStrategies() {
             try {
                 const response = await fetch('/api/custom-strategies');
@@ -847,7 +890,7 @@
         function toggleAutoRefresh() {
             const checkbox = document.getElementById('auto-refresh');
             if (checkbox.checked) {
-                autoRefreshInterval = setInterval(loadStrategies, 5000);
+                autoRefreshInterval = setInterval(() => { loadStrategies(); fetchExchangeRates(); }, 5000);
             } else {
                 if (autoRefreshInterval) {
                     clearInterval(autoRefreshInterval);
@@ -859,10 +902,11 @@
         // 初始加载
         window.onload = function() {
             loadStrategies();
+            fetchExchangeRates(); // 加载汇率
             // 如果自动刷新复选框被选中，启动自动刷新
             const checkbox = document.getElementById('auto-refresh');
             if (checkbox.checked) {
-                autoRefreshInterval = setInterval(loadStrategies, 5000);
+                autoRefreshInterval = setInterval(() => { loadStrategies(); fetchExchangeRates(); }, 5000);
             }
         };
     </script>

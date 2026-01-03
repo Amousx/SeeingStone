@@ -192,9 +192,6 @@ func startLighterWSPool(store *pricestore.PriceStore, markets []*lighter.Market,
 	} else {
 		// 更新到 store（冷启动数据）
 		for _, price := range prices {
-			if price.MarketType != "FUTURE" {
-				print("123")
-			}
 			store.UpdatePrice(price)
 		}
 		log.Printf("[Lighter] Loaded %d markets from REST snapshot", len(prices))
@@ -237,6 +234,21 @@ func startBinanceSpotWSPool(store *pricestore.PriceStore) *binance.SpotWSPool {
 		symbols = append(symbols, price.Symbol)
 	}
 	log.Printf("[Binance Spot] Loaded %d symbols from REST snapshot", len(symbols))
+	// 确保汇率交易对被订阅（用于Quote Normalization）
+	ratePairs := []string{"USDCUSDT", "USDEUSDT", "FDUSDUSDT"}
+	for _, pair := range ratePairs {
+		found := false
+		for _, symbol := range symbols {
+			if symbol == pair {
+				found = true
+				break
+			}
+		}
+		if !found {
+			symbols = append(symbols, pair)
+			log.Printf("[Binance Spot] Added exchange rate pair: %s", pair)
+		}
+	}
 
 	// 步骤2：创建 WebSocket 连接池（每个连接 50 个 symbol）
 	pool := binance.NewSpotWSPool(symbols, 50)

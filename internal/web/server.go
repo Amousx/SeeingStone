@@ -40,6 +40,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/arbitrage-opportunities", s.handleArbitrageOpportunities)
 	mux.HandleFunc("/api/debug/prices", s.handleDebugPrices)
 	mux.HandleFunc("/api/prices/", s.handlePricesBySymbol)
+	mux.HandleFunc("/api/exchange-rates", s.handleExchangeRates)
 
 	// Static files - 使用子文件系统来正确访问 static 目录
 	staticDir, err := fs.Sub(staticFS, "static")
@@ -180,6 +181,37 @@ func (s *Server) handleArbitrageOpportunities(w http.ResponseWriter, r *http.Req
 		"success": true,
 		"count":   len(opportunities),
 		"data":    opportunities,
+	})
+}
+
+// handleExchangeRates 处理汇率查询请求
+func (s *Server) handleExchangeRates(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// 获取所有汇率
+	rates := s.store.GetExchangeRates()
+
+	// 转换为API响应格式
+	result := make([]map[string]interface{}, 0)
+	for currency, rate := range rates {
+		result = append(result, map[string]interface{}{
+			"from_currency":   currency,
+			"to_currency":     "USDT",
+			"rate":            rate.Rate,
+			"source":          rate.Source,
+			"last_updated":    rate.LastUpdated,
+			"is_default_rate": rate.IsDefaultRate,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"count":   len(result),
+		"data":    result,
 	})
 }
 

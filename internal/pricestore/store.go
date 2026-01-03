@@ -27,16 +27,23 @@ type PriceStore struct {
 	// 套利机会历史跟踪
 	// key: symbol_type_buyFrom_sellTo, value: tracker
 	opportunityHistory map[string]*opportunityTracker
+	// 汇率管理器 - Quote Normalization Layer
+	exchangeRateManager *ExchangeRateManager
 }
 
 // NewPriceStore 创建价格存储器
 func NewPriceStore() *PriceStore {
-	return &PriceStore{
+	ps := &PriceStore{
 		byExchange:         make(map[common.Exchange]map[string]*common.Price),
 		bySymbol:           make(map[string]map[string]*common.Price),
 		symbolNormalizer:   NewSymbolNormalizer(),
 		opportunityHistory: make(map[string]*opportunityTracker),
 	}
+
+	// 初始化汇率管理器（需要ps作为参数，所以分步初始化）
+	ps.exchangeRateManager = NewExchangeRateManager(ps)
+
+	return ps
 }
 
 // UpdatePrice 更新价格数据（线程安全）
@@ -46,8 +53,23 @@ func (ps *PriceStore) UpdatePrice(price *common.Price) bool {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
-	// 标准化symbol
-	standardSymbol := ps.symbolNormalizer.Normalize(price.Symbol)
+	// === Quote Normalization Layer ===
+	// 1. 解析symbol,识别quote currency
+	symbolInfo := common.ParseSymbol(price.Symbol)
+	price.QuoteCurrency = symbolInfo.QuoteAsset
+
+	// 2. 如果不是USDT,进行标准化
+	if price.QuoteCurrency != common.QuoteCurrencyUSDT {
+		rate := ps.exchangeRateManager.GetRate(price.QuoteCurrency)
+		price.NormalizeToUSDT(rate.Rate, rate.Source)
+	} else {
+		price.IsNormalized = true
+		price.ExchangeRate = 1.0
+		price.ExchangeRateSource = "IDENTITY"
+	}
+
+	// 3. 使用标准化的symbol进行索引
+	standardSymbol := ps.symbolNormalizer.Normalize(symbolInfo.ToStandardSymbol())
 
 	// 生成各种key
 	exchangeKey := ps.makeExchangeKey(price.MarketType, price.Symbol)
@@ -74,6 +96,15 @@ func (ps *PriceStore) UpdatePrice(price *common.Price) bool {
 		ps.bySymbol[standardSymbol] = make(map[string]*common.Price)
 	}
 	ps.bySymbol[standardSymbol][symbolKey] = price
+
+	// 4. 如果是币安的汇率交易对，触发汇率更新
+	if price.Exchange == common.ExchangeBinance && price.MarketType == common.MarketTypeSpot {
+		// 检查是否为汇率交易对 (USDCUSDT, USDEUSDT, FDUSDUSDT)
+		if price.Symbol == "USDCUSDT" || price.Symbol == "USDEUSDT" || price.Symbol == "FDUSDUSDT" {
+			// 异步更新汇率，避免持锁时间过长
+			go ps.exchangeRateManager.UpdateFromBinance()
+		}
+	}
 
 	return true
 }
@@ -256,6 +287,15 @@ type Spread struct {
 	SpreadAbsolute float64           `json:"spread_absolute"`
 	Volume24h      float64           `json:"volume_24h"`
 	UpdatedAt      time.Time         `json:"updated_at"`
+
+	// === Quote Normalization 信息 ===
+	BuyQuoteCurrency  common.QuoteCurrency `json:"buy_quote_currency"`
+	BuyOriginalPrice  float64              `json:"buy_original_price"`
+	BuyExchangeRate   float64              `json:"buy_exchange_rate"`
+	SellQuoteCurrency common.QuoteCurrency `json:"sell_quote_currency"`
+	SellOriginalPrice float64              `json:"sell_original_price"`
+	SellExchangeRate  float64              `json:"sell_exchange_rate"`
+	EffectiveSpread   float64              `json:"effective_spread"` // 扣除汇率成本后的有效价差
 }
 
 // CalculateSpreads 计算所有symbol的价差
@@ -317,7 +357,7 @@ func (ps *PriceStore) CalculateSpreads() []*Spread {
 
 // calculateSpread 计算单向价差（买buyPrice卖sellPrice）
 func (ps *PriceStore) calculateSpread(buyPrice, sellPrice *common.Price) *Spread {
-	// 使用ask价格买入，bid价格卖出
+	// 使用ask价格买入，bid价格卖出（已经是标准化后的USDT价格）
 	askPrice := buyPrice.AskPrice
 	if askPrice == 0 {
 		askPrice = buyPrice.Price
@@ -332,9 +372,21 @@ func (ps *PriceStore) calculateSpread(buyPrice, sellPrice *common.Price) *Spread
 		return nil
 	}
 
-	// 计算价差百分比
+	// 计算名义价差（不考虑汇率成本）
 	spreadPercent := ((bidPrice - askPrice) / askPrice) * 100
 	spreadAbsolute := bidPrice - askPrice
+
+	// 计算有效价差（考虑汇率转换成本）
+	// 假设每次汇率转换有0.01%的滑点成本 Warning : usdc/fdusde没有成本，usde有成本。
+	exchangeRateCost := 0.0
+	if !common.IsFreeStablecoin(buyPrice.QuoteCurrency) {
+		exchangeRateCost += 0.03
+	}
+	if !common.IsFreeStablecoin(sellPrice.QuoteCurrency) {
+		exchangeRateCost += 0.03
+	}
+
+	effectiveSpread := spreadPercent - exchangeRateCost
 
 	// 选择较小的volume
 	volume := buyPrice.Volume24h
@@ -346,6 +398,17 @@ func (ps *PriceStore) calculateSpread(buyPrice, sellPrice *common.Price) *Spread
 	updatedAt := buyPrice.LastUpdated
 	if sellPrice.LastUpdated.After(updatedAt) {
 		updatedAt = sellPrice.LastUpdated
+	}
+
+	// 获取原始价格（如果已标准化）
+	buyOriginalPrice := buyPrice.OriginalAskPrice
+	if buyOriginalPrice == 0 {
+		buyOriginalPrice = askPrice // 如果没有标准化，原始价格就是当前价格
+	}
+
+	sellOriginalPrice := sellPrice.OriginalBidPrice
+	if sellOriginalPrice == 0 {
+		sellOriginalPrice = bidPrice
 	}
 
 	return &Spread{
@@ -360,6 +423,15 @@ func (ps *PriceStore) calculateSpread(buyPrice, sellPrice *common.Price) *Spread
 		SpreadAbsolute: spreadAbsolute,
 		Volume24h:      volume,
 		UpdatedAt:      updatedAt,
+
+		// Quote Normalization 信息
+		BuyQuoteCurrency:  buyPrice.QuoteCurrency,
+		BuyOriginalPrice:  buyOriginalPrice,
+		BuyExchangeRate:   buyPrice.ExchangeRate,
+		SellQuoteCurrency: sellPrice.QuoteCurrency,
+		SellOriginalPrice: sellOriginalPrice,
+		SellExchangeRate:  sellPrice.ExchangeRate,
+		EffectiveSpread:   effectiveSpread,
 	}
 }
 
@@ -1088,4 +1160,9 @@ func (ps *PriceStore) calculateSpreadStrategy(buyPrice, sellPrice *common.Price)
 		LastUpdated: updatedAt,
 		Status:      "ready",
 	}
+}
+
+// GetExchangeRates 获取所有汇率信息（用于API）
+func (ps *PriceStore) GetExchangeRates() map[common.QuoteCurrency]*ExchangeRate {
+	return ps.exchangeRateManager.GetAllRates()
 }

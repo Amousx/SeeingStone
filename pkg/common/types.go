@@ -45,6 +45,39 @@ type Price struct {
 	Timestamp   time.Time   `json:"timestamp"`    // 交易所行情时间（关键！）
 	LastUpdated time.Time   `json:"last_updated"` // 本地接收时间（用于过期判断）
 	Source      PriceSource `json:"source"`       // 数据来源：WebSocket或REST
+
+	// === Quote Normalization 扩展字段 ===
+	QuoteCurrency      QuoteCurrency `json:"quote_currency"`        // 原始报价货币
+	OriginalBidPrice   float64       `json:"original_bid_price"`    // 原始bid价格(转换前)
+	OriginalAskPrice   float64       `json:"original_ask_price"`    // 原始ask价格(转换前)
+	ExchangeRate       float64       `json:"exchange_rate"`         // 使用的汇率
+	ExchangeRateSource string        `json:"exchange_rate_source"`  // 汇率来源
+	IsNormalized       bool          `json:"is_normalized"`         // 是否已标准化
+}
+
+// NormalizeToUSDT 标准化价格到USDT
+func (p *Price) NormalizeToUSDT(rate float64, rateSource string) {
+	if p.QuoteCurrency == QuoteCurrencyUSDT {
+		// 已经是USDT,无需转换
+		p.IsNormalized = true
+		p.ExchangeRate = 1.0
+		p.ExchangeRateSource = "IDENTITY"
+		return
+	}
+
+	// 保存原始价格
+	p.OriginalBidPrice = p.BidPrice
+	p.OriginalAskPrice = p.AskPrice
+
+	// 应用汇率转换
+	p.BidPrice = p.BidPrice * rate
+	p.AskPrice = p.AskPrice * rate
+	p.Price = (p.BidPrice + p.AskPrice) / 2
+
+	// 记录转换信息
+	p.ExchangeRate = rate
+	p.ExchangeRateSource = rateSource
+	p.IsNormalized = true
 }
 
 // ArbitrageOpportunity 套利机会
