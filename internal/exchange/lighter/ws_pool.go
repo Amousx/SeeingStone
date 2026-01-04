@@ -14,29 +14,29 @@ import (
 // WSPool Lighter WebSocket 连接池
 // 解决 order_book/all 不支持的问题，使用分片订阅模式
 type WSPool struct {
-	markets           []*Market                   // 所有需要订阅的市场
-	connections       []*WSPoolConnection         // WebSocket 连接池
-	priceHandler      func(*common.Price)         // 价格处理器
-	marketsPerConn    int                         // 每个连接订阅的市场数量
-	mu                sync.RWMutex
-	done              chan struct{}
+	markets        []*Market           // 所有需要订阅的市场
+	connections    []*WSPoolConnection // WebSocket 连接池
+	priceHandler   func(*common.Price) // 价格处理器
+	marketsPerConn int                 // 每个连接订阅的市场数量
+	mu             sync.RWMutex
+	done           chan struct{}
 }
 
 // WSPoolConnection 单个 WebSocket 连接
 type WSPoolConnection struct {
-	ID                int
-	URL               string
-	Conn              *websocket.Conn
-	Markets           []*Market
-	orderBookData     map[int]*OrderBookData     // 快照数据（兼容旧逻辑）
-	marketStatsData   map[int]*MarketStatsData
-	localOrderBooks   map[int]*LocalOrderBook    // 本地维护的订单簿（增量更新）
-	mu                sync.RWMutex
-	reconnect         bool
-	done              chan struct{}
-	connectedAt       time.Time
-	lastPongTime      time.Time
-	priceHandler      func(*common.Price)
+	ID              int
+	URL             string
+	Conn            *websocket.Conn
+	Markets         []*Market
+	orderBookData   map[int]*OrderBookData // 快照数据（兼容旧逻辑）
+	marketStatsData map[int]*MarketStatsData
+	localOrderBooks map[int]*LocalOrderBook // 本地维护的订单簿（增量更新）
+	mu              sync.RWMutex
+	reconnect       bool
+	done            chan struct{}
+	connectedAt     time.Time
+	lastPongTime    time.Time
+	priceHandler    func(*common.Price)
 }
 
 // NewWSPool 创建 Lighter WebSocket 连接池
@@ -67,8 +67,6 @@ func (p *WSPool) Start() error {
 
 	// 计算需要的连接数
 	numConnections := (len(p.markets) + p.marketsPerConn - 1) / p.marketsPerConn
-	log.Printf("[Lighter Pool] Starting %d WebSocket connections for %d markets (%d markets/conn)",
-		numConnections, len(p.markets), p.marketsPerConn)
 
 	// 创建连接
 	for i := 0; i < numConnections; i++ {
@@ -90,7 +88,6 @@ func (p *WSPool) Start() error {
 		p.connections = append(p.connections, conn)
 	}
 
-	log.Printf("[Lighter Pool] Successfully started %d/%d connections", len(p.connections), numConnections)
 	return nil
 }
 
@@ -148,7 +145,7 @@ func (c *WSPoolConnection) Connect() error {
 	c.lastPongTime = now
 	c.mu.Unlock()
 
-	log.Printf("[Lighter Pool #%d] Connected, subscribing to %d markets", c.ID, len(c.Markets))
+	//log.Printf("[Lighter Pool #%d] Connected, subscribing to %d markets", c.ID, len(c.Markets))
 
 	// 设置 Pong 处理器
 	conn.SetPongHandler(func(appData string) error {
@@ -355,7 +352,6 @@ func (c *WSPoolConnection) handleOrderBookSnapshot(snapshot *OrderBookUpdate) {
 			snapshot.OrderBook.Nonce,
 			snapshot.Offset,
 		)
-		log.Printf("[Lighter Pool #%d] ✓ Order book snapshot initialized for market %d", c.ID, marketID)
 	}
 	c.mu.Unlock()
 
@@ -413,7 +409,7 @@ func (c *WSPoolConnection) handleOrderBookIncrementalUpdate(update *OrderBookUpd
 
 	// 检查是否需要定期全量同步
 	if localOB.NeedsPeriodicSync() {
-		log.Printf("[Lighter Pool #%d] 🔄 Periodic sync triggered for market %d", c.ID, marketID)
+		//log.Printf("[Lighter Pool #%d] 🔄 Periodic sync triggered for market %d", c.ID, marketID)
 		go c.resyncOrderBookFromREST(marketID)
 	}
 
@@ -441,8 +437,6 @@ func (c *WSPoolConnection) resyncOrderBookFromREST(marketID int) {
 	// 2. 使用快照重新初始化本地订单簿
 	// 3. 重置同步计数器
 
-	log.Printf("[Lighter Pool #%d] REST snapshot resync for market %d - NOT IMPLEMENTED YET", c.ID, marketID)
-
 	// 临时解决方案：标记本地订单簿为未初始化，等待下次 WS 快照
 	c.mu.RLock()
 	localOB, exists := c.localOrderBooks[marketID]
@@ -451,7 +445,6 @@ func (c *WSPoolConnection) resyncOrderBookFromREST(marketID int) {
 	if exists {
 		// 不清空订单簿，但重置同步计数器，避免频繁触发
 		localOB.ResetSyncCounter()
-		log.Printf("[Lighter Pool #%d] Reset sync counter for market %d, waiting for next WS snapshot", c.ID, marketID)
 	}
 }
 

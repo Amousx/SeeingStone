@@ -21,6 +21,7 @@ const (
 	ExchangeGate        Exchange = "GATE"
 	ExchangeHyperliquid Exchange = "HYPERLIQUID"
 	ExchangeLighter     Exchange = "LIGHTER"
+	ExchangeOKX         Exchange = "OKX" // OKX DEX (链上价格)
 )
 
 // PriceSource 价格数据来源

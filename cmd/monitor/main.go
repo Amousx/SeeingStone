@@ -6,6 +6,7 @@ import (
 	"crypto-arbitrage-monitor/internal/exchange/aster"
 	"crypto-arbitrage-monitor/internal/exchange/binance"
 	"crypto-arbitrage-monitor/internal/exchange/lighter"
+	"crypto-arbitrage-monitor/internal/exchange/okx"
 	"crypto-arbitrage-monitor/internal/pricestore"
 	"crypto-arbitrage-monitor/internal/web"
 	"crypto-arbitrage-monitor/pkg/common"
@@ -120,14 +121,23 @@ func main() {
 		runBinanceRESTUpdater(store, stopChan)
 	}()
 
-	// 任务4: 统计信息打印
+	// 任务4: OKX DEX数据获取（可选）
+	if shouldStartOKX(cfg) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			runOKXUpdater(cfg, store, stopChan)
+		}()
+	}
+
+	// 任务5: 统计信息打印
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		runStatsReporter(store, stopChan)
 	}()
 
-	// 任务5: 定期清理过期数据
+	// 任务6: 定期清理过期数据
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -672,6 +682,64 @@ func parseFloat(s string) float64 {
 		return 0
 	}
 	return f
+}
+
+// shouldStartOKX 检查是否应该启动OKX
+func shouldStartOKX(cfg *config.Config) bool {
+	// 检查配置文件是否存在
+	_, err := os.Stat(cfg.OKXAPIConfigFile)
+	return err == nil
+}
+
+// runOKXUpdater 运行OKX价格更新任务
+func runOKXUpdater(cfg *config.Config, store *pricestore.PriceStore, stopChan <-chan struct{}) {
+	// 加载代币配置
+	tokenConfigs, err := okx.LoadTokenConfigs(cfg.OKXTokenConfig)
+	if err != nil {
+		log.Printf("[OKX] Failed to load token configs: %v", err)
+		return
+	}
+
+	if len(tokenConfigs) == 0 {
+		log.Println("[OKX] No tokens configured, skipping OKX updates")
+		return
+	}
+
+	// 加载API配置
+	apiConfigs, err := okx.LoadAPIConfigs(cfg.OKXAPIConfigFile)
+	if err != nil {
+		log.Printf("[OKX] Failed to load API configs: %v", err)
+		return
+	}
+
+	// 创建价格获取器（使用Worker架构）
+	fetcher := okx.NewPriceFetcher(apiConfigs, tokenConfigs, store)
+	defer fetcher.Close()
+
+	// 立即执行一次
+	log.Println("[OKX] Fetching initial prices...")
+	if err := fetcher.FetchAllPrices(); err != nil {
+		log.Printf("[OKX] Initial fetch failed: %v", err)
+	}
+
+	// 定期更新
+	updateInterval := time.Duration(cfg.OKXUpdateInterval) * time.Second
+	ticker := time.NewTicker(updateInterval)
+	defer ticker.Stop()
+
+	log.Printf("[OKX] Starting periodic updates every %v", updateInterval)
+
+	for {
+		select {
+		case <-stopChan:
+			log.Println("[OKX] Stopping updater...")
+			return
+		case <-ticker.C:
+			if err := fetcher.FetchAllPrices(); err != nil {
+				log.Printf("[OKX] Fetch failed: %v", err)
+			}
+		}
+	}
 }
 
 // openBrowser 根据操作系统打开默认浏览器

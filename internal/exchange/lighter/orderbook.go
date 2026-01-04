@@ -9,16 +9,16 @@ import (
 
 // LocalOrderBook 本地维护的订单簿（支持增量更新）
 type LocalOrderBook struct {
-	MarketID        int
-	Symbol          string
-	Bids            map[float64]*Order // price -> order
-	Asks            map[float64]*Order // price -> order
-	lastNonce       int64              // 最后一次更新的 nonce
-	lastOffset      int64              // 最后一次更新的 offset
-	updateCount     int64              // 更新计数器（用于定期同步）
-	initialized     bool               // 是否已从快照初始化
-	lastSyncTime    int64              // 最后一次全量同步时间戳
-	mu              sync.RWMutex
+	MarketID     int
+	Symbol       string
+	Bids         map[float64]*Order // price -> order
+	Asks         map[float64]*Order // price -> order
+	lastNonce    int64              // 最后一次更新的 nonce
+	lastOffset   int64              // 最后一次更新的 offset
+	updateCount  int64              // 更新计数器（用于定期同步）
+	initialized  bool               // 是否已从快照初始化
+	lastSyncTime int64              // 最后一次全量同步时间戳
+	mu           sync.RWMutex
 }
 
 // NewLocalOrderBook 创建本地订单簿
@@ -70,9 +70,6 @@ func (ob *LocalOrderBook) InitializeFromSnapshot(bids, asks []PriceLevel, nonce,
 	ob.initialized = true
 	ob.lastSyncTime = getCurrentTimestamp()
 	ob.updateCount = 0
-
-	log.Printf("[OrderBook %s] Initialized with %d bids, %d asks (nonce=%d, offset=%d)",
-		ob.Symbol, len(ob.Bids), len(ob.Asks), nonce, offset)
 }
 
 // UpdateOrder 更新订单（处理 add/update/remove 事件）

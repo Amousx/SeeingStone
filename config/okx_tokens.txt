@@ -1,0 +1,15 @@
+# OKX DEX Token Configuration
+# Format: Symbol,ChainIndex,Address,Decimals
+# ChainIndex: 1=Ethereum, 56=BSC, 137=Polygon, 42161=Arbitrum, etc.
+# Address: Token contract address (will be converted to lowercase)
+# Decimals: Token precision
+
+# Ethereum Mainnet (ChainIndex=1) - 常见稳定币和主流币
+# 示例：添加更多代币
+# UNI,1,0x1f9840a85d5af5bf1d1762f925bdaddc4201f984,18
+# LINK,1,0x514910771af9ca656af840dff83e8264ecf986ca,18
+# AAVE,1,0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9,18
+
+WETH,1,0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2,18
+WBTC,1,0x2260fac5e5542a773aa44fbcfedf7c193bc2c599,8
+RIVER,56,0xda7ad9dea9397cffddae2f8a052b82f1484252b3,6

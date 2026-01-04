@@ -266,11 +266,6 @@ func (w *WSClient) readMessages() {
 			// 1️⃣ 优先尝试解析 BookTicker（真实bid/ask）
 			var bookTicker WSBookTickerData
 			if err := json.Unmarshal(message, &bookTicker); err == nil && bookTicker.Symbol != "" && bookTicker.BidPrice != "" {
-				// 打印 BTC/ETH/SOL 相关的数据用于调试
-				if bookTicker.Symbol == "BTCUSDT" || bookTicker.Symbol == "ETHUSDT" || bookTicker.Symbol == "SOLUSDT" {
-					log.Printf("[Aster WS %s] BookTicker %s: bid=%s, ask=%s, txnTime=%d, eventTime=%d",
-						w.MarketType, bookTicker.Symbol, bookTicker.BidPrice, bookTicker.AskPrice, bookTicker.TxnTime, bookTicker.EventTime)
-				}
 
 				w.mu.RLock()
 				handler := w.bookTickerHandler
@@ -398,7 +393,7 @@ func ConvertWSBookTickerToPrice(ticker *WSBookTickerData, exchange common.Exchan
 		AskPrice:    askPrice, // 真实ask价格
 		BidQty:      bidQty,
 		AskQty:      askQty,
-		Volume24h:   0, // BookTicker不包含成交量
+		Volume24h:   0,                 // BookTicker不包含成交量
 		Timestamp:   exchangeTimestamp, // 使用交易所时间
 		LastUpdated: time.Now(),        // 本地接收时间
 		Source:      common.PriceSourceWebSocket,

@@ -13,10 +13,10 @@ import (
 // SpotWSPool Binance 现货 WebSocket 连接池
 // 解决现货不支持 !bookTicker 全量流的问题
 type SpotWSPool struct {
-	symbols           []string                    // 所有需要订阅的 symbol
-	connections       []*SpotWSConnection         // WebSocket 连接池
-	bookTickerHandler func(*WSBookTickerData)     // BookTicker 处理器
-	symbolsPerConn    int                         // 每个连接订阅的 symbol 数量
+	symbols           []string                // 所有需要订阅的 symbol
+	connections       []*SpotWSConnection     // WebSocket 连接池
+	bookTickerHandler func(*WSBookTickerData) // BookTicker 处理器
+	symbolsPerConn    int                     // 每个连接订阅的 symbol 数量
 	mu                sync.RWMutex
 	done              chan struct{}
 }
@@ -134,7 +134,7 @@ func (c *SpotWSConnection) Connect() error {
 	c.lastPongTime = now
 	c.mu.Unlock()
 
-	log.Printf("[Binance Spot #%d] Connected, subscribing to %d symbols", c.ID, len(c.Symbols))
+	//log.Printf("[Binance Spot #%d] Connected, subscribing to %d symbols", c.ID, len(c.Symbols))
 
 	// 设置 Pong 处理器
 	conn.SetPongHandler(func(appData string) error {

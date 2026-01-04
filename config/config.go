@@ -29,6 +29,11 @@ type Config struct {
 	// Lighter配置
 	LighterMarketRefreshInterval int // Lighter市场刷新间隔（分钟），0表示禁用自动刷新
 
+	// OKX DEX配置
+	OKXAPIConfigFile  string // OKX API配置文件路径（每行：APIKey,SecretKey,Passphrase）
+	OKXTokenConfig    string // OKX代币配置文件路径
+	OKXUpdateInterval int    // OKX价格更新间隔（秒）
+
 	// 代理配置
 	HTTPProxy  string // HTTP 代理地址，例如: http://127.0.0.1:7890
 	HTTPSProxy string // HTTPS 代理地址，例如: http://127.0.0.1:7890
@@ -60,6 +65,11 @@ func LoadConfig() *Config {
 
 		// Lighter配置
 		LighterMarketRefreshInterval: getEnvInt("LIGHTER_MARKET_REFRESH_INTERVAL", 10), // 默认10分钟刷新一次
+
+		// OKX DEX配置
+		OKXAPIConfigFile:  getEnv("OKX_API_CONFIG", "config/okx_api_keys.txt"),
+		OKXTokenConfig:    getEnv("OKX_TOKEN_CONFIG", "config/okx_tokens.txt"),
+		OKXUpdateInterval: getEnvInt("OKX_UPDATE_INTERVAL", 8), // 默认30秒更新一次
 
 		// 代理配置（默认为空，不使用代理）
 		HTTPProxy:  getEnv("HTTP_PROXY", ""),
